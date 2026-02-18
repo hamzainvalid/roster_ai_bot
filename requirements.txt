@@ -3,6 +3,7 @@ uvicorn
 requests
 langchain
 langchain-community
+langchain-google-genai  # Add this instead of langchain-openai
 google-generativeai
 pydantic
-langchain-openai
+python-multipart  # Often needed for web interfaces
