@@ -10,7 +10,7 @@ SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 GEMINI_API_KEY = os.environ["GEM_API"]
 
 llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-flash",
+    model="gemini-2.5-flash",
     google_api_key=GEMINI_API_KEY,
     temperature=0.1
 )
@@ -85,7 +85,7 @@ async def chat_completions(request: ChatCompletionRequest):
 async def list_models():
     return {
         "data": [{
-            "id": "gemini-1.5-flash",
+            "id": "gemini-2.5-flash",
             "object": "model",
             "created": 1677610602,
             "owned_by": "google"
