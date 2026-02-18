@@ -1,9 +1,12 @@
 import os
 import requests
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware  # Added for better compatibility
 from pydantic import BaseModel
 from typing import List, Optional
 from langchain_google_genai import ChatGoogleGenerativeAI
+import time
+import json
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
@@ -16,6 +19,15 @@ llm = ChatGoogleGenerativeAI(
 )
 
 app = FastAPI()
+
+# Add CORS middleware for OpenWebUI compatibility
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # OpenAI-compatible request/response models
@@ -64,7 +76,7 @@ async def chat_completions(request: ChatCompletionRequest):
         "id": f"chatcmpl-{int(time.time())}",
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": "gemini-pro",
+        "model": "gemini-2.5-flash",  # Updated to match your model
         "choices": [{
             "index": 0,
             "message": {
@@ -74,7 +86,7 @@ async def chat_completions(request: ChatCompletionRequest):
             "finish_reason": "stop"
         }],
         "usage": {
-            "prompt_tokens": -1,  # Gemini doesn't provide token counts
+            "prompt_tokens": -1,
             "completion_tokens": -1,
             "total_tokens": -1
         }
@@ -93,46 +105,102 @@ async def list_models():
     }
 
 
-# Your existing /ask endpoint
+# Your existing /ask endpoint with improved formatting
 class Question(BaseModel):
     question: str
 
 
+# Updated SYSTEM_PROMPT to be more explicit
 SYSTEM_PROMPT = """
-You generate ONLY SQL.
-Table: roster(staff_id, staff_name, date, shift)
-Return pure SQL, no markdown, no explanation.
+You are a SQL expert. Generate ONLY the SQL query for the given question.
+Table schema: roster(staff_id, staff_name, date, shift)
+
+Rules:
+- Return pure SQL only
+- No markdown formatting
+- No explanations
+- No backticks
+- Date format should be YYYY-MM-DD
+- Use single quotes for strings
+
+Example:
+Question: Show all staff working on Monday
+SQL: SELECT * FROM roster WHERE date = '2024-01-15';
+"""
+
+# Second prompt for interpreting results
+RESULT_INTERPRETER_PROMPT = """
+You are a helpful database assistant. Based on the original question and the SQL query results, provide a natural, conversational answer.
+
+Original Question: {question}
+SQL Query Used: {sql}
+Query Results: {result}
+
+Provide a clear and concise answer that directly addresses the user's question. If there are no results, explain that politely.
 """
 
 
 def run_sql(sql):
-    r = requests.post(
-        f"{SUPABASE_URL}/rest/v1/rpc/run_sql",
-        headers={
-            "apikey": SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
-            "Content-Type": "application/json"
-        },
-        json={"query": sql}
-    )
-    return r.json()
+    """Execute SQL against Supabase"""
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        r = requests.post(
+            f"{SUPABASE_URL}/rest/v1/rpc/run_sql",
+            headers=headers,
+            json={"query": sql}
+        )
+
+        if r.status_code == 200:
+            return r.json()
+        else:
+            return {"error": f"SQL execution failed: {r.status_code}", "details": r.text}
+    except Exception as e:
+        return {"error": f"Database connection error: {str(e)}"}
 
 
 @app.post("/ask")
 def ask(q: Question):
     from langchain_core.messages import HumanMessage, SystemMessage
 
+    # Step 1: Generate SQL
     messages = [
         SystemMessage(content=SYSTEM_PROMPT),
         HumanMessage(content=q.question)
     ]
 
     response = llm.invoke(messages)
-    sql = response.content
+    sql = response.content.strip()
 
+    # Clean up SQL if it has markdown
+    sql = sql.replace("```sql", "").replace("```", "").strip()
+
+    # Step 2: Execute SQL
     result = run_sql(sql)
 
-    return {
-        "sql": sql,
-        "result": result
-    }
+    # Step 3: Generate natural language response (optional - comment out if you just want raw results)
+    try:
+        interpret_messages = [
+            SystemMessage(content="You are a helpful assistant that explains database results in plain English."),
+            HumanMessage(content=RESULT_INTERPRETER_PROMPT.format(
+                question=q.question,
+                sql=sql,
+                result=json.dumps(result, indent=2) if isinstance(result, (dict, list)) else str(result)
+            ))
+        ]
+        interpretation = llm.invoke(interpret_messages).content
+    except Exception as e:
+        interpretation = "Could not generate interpretation."
+
+    # Format a beautiful response for OpenWebUI
+    formatted_response = f"""
+### 🔍 Your Question
+{q.question}
+
+### 📝 SQL Query Generated
+```sql
+{sql}
