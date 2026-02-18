@@ -85,7 +85,7 @@ async def chat_completions(request: ChatCompletionRequest):
 async def list_models():
     return {
         "data": [{
-            "id": "gemini-pro",
+            "id": "gemini-3-flash-preview",
             "object": "model",
             "created": 1677610602,
             "owned_by": "google"
