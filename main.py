@@ -182,7 +182,7 @@ def ask(q: Question):
     # Step 2: Execute SQL
     result = run_sql(sql)
 
-    # Step 3: Generate natural language response (optional - comment out if you just want raw results)
+    # Step 3: Generate natural language response
     try:
         interpret_messages = [
             SystemMessage(content="You are a helpful assistant that explains database results in plain English."),
@@ -196,11 +196,53 @@ def ask(q: Question):
     except Exception as e:
         interpretation = "Could not generate interpretation."
 
-    # Format a beautiful response for OpenWebUI
-    formatted_response = f"""
-### 🔍 Your Question
-{q.question}
+    # Format a beautiful response for OpenWebUI - FIXED SYNTAX
+    formatted_response = (
+        "### 🔍 Your Question\n"
+        f"{q.question}\n\n"
+        "### 📝 SQL Query Generated\n"
+        "```sql\n"
+        f"{sql}\n"
+        "```\n\n"
+        "### 📊 Query Results\n"
+        "```json\n"
+        f"{json.dumps(result, indent=2) if isinstance(result, (dict, list)) else result}\n"
+        "```\n\n"
+        "### 💡 Answer\n"
+        f"{interpretation}"
+    )
 
-### 📝 SQL Query Generated
-```sql
-{sql}
+    # Return in the format expected by OpenWebUI's Direct Connection
+    return {
+        "result": formatted_response
+    }
+
+
+@app.post("/ask-simple")
+def ask_simple(q: Question):
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    messages = [
+        SystemMessage(content=SYSTEM_PROMPT),
+        HumanMessage(content=q.question)
+    ]
+
+    response = llm.invoke(messages)
+    sql = response.content.strip()
+    sql = sql.replace("```sql", "").replace("```", "").strip()
+
+    result = run_sql(sql)
+
+    # Simple formatted response - FIXED SYNTAX
+    formatted_response = (
+        "**SQL Query:**\n"
+        "```sql\n"
+        f"{sql}\n"
+        "```\n\n"
+        "**Result:**\n"
+        "```\n"
+        f"{json.dumps(result, indent=2) if isinstance(result, (dict, list)) else result}\n"
+        "```"
+    )
+
+    return {"result": formatted_response}
