@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+requests
+langchain
+langchain-community
+google-generativeai
+pydantic

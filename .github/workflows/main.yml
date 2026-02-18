@@ -1,0 +1,37 @@
+name: roster_bot
+
+on:
+  push:
+    branches:
+     - main
+
+
+env:
+  GEM_API: ${{ secrets.GEM_API }}
+  SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v4
+
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+
+    - name: Build Docker image
+      run: |
+        docker build -t hamzainvalid0302/roster_bot:latest .
+
+    - name: Push Docker image
+      run: |
+        docker push hamzainvalid0302/roster_bot:latest
+
+
