@@ -5,3 +5,4 @@ langchain
 langchain-community
 google-generativeai
 pydantic
+langchain-openai

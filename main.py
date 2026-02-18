@@ -2,7 +2,7 @@ import os
 import requests
 from fastapi import FastAPI
 from pydantic import BaseModel
-from langchain.llms import OpenAI
+from langchain_openai import OpenAI
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
