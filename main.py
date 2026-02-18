@@ -10,7 +10,7 @@ SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 GEMINI_API_KEY = os.environ["GEM_API"]
 
 llm = ChatGoogleGenerativeAI(
-    model="gemini-pro",
+    model="gemini-1.5-flash",
     google_api_key=GEMINI_API_KEY,
     temperature=0.1
 )
