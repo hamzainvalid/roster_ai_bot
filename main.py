@@ -63,6 +63,19 @@ class ChatRequest(BaseModel):
     messages: List[Message]
     temperature: Optional[float] = 0.0
 
+@app.get("/v1/models")
+def list_models():
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "text2sql-roster",
+                "object": "model",
+                "owned_by": "organization"
+            }
+        ]
+    }
+
 @app.post("/v1/chat/completions")
 async def chat(req: ChatRequest):
 
