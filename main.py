@@ -103,7 +103,7 @@ def load_schema() -> dict:
                 name = c.get("column_name", "")
                 dtype = c.get("data_type", "")
                 if name == "date":
-                    cols.append("date TEXT (format: 'YYYY-MM-DD HH:MM:SS')")
+                    cols.append("date TEXT (format: 'YYYY-MM-DD', e.g. '2026-02-18')")
                 else:
                     cols.append(f"{name} {dtype}")
             schema_str = "Table: roster(" + ", ".join(cols) + ")"
@@ -117,7 +117,7 @@ def load_schema() -> dict:
     except Exception as e:
         logger.warning(f"Schema load fallback: {e}")
         return {
-            "schema": "Table: roster(staff_id TEXT, staff_name TEXT, date TEXT (format: 'YYYY-MM-DD HH:MM:SS'), shift TEXT)",
+            "schema": "Table: roster(staff_id TEXT, staff_name TEXT, date TEXT (format: 'YYYY-MM-DD', e.g. '2026-02-18'), shift TEXT)",
             "shift_codes": list(SHIFT_MEANINGS.keys()),
         }
 
@@ -134,12 +134,15 @@ SCHEMA:
 SHIFT CODES:
 {json.dumps(SHIFT_MEANINGS, indent=2)}
 
-DATE RULES (date column is TEXT, format 'YYYY-MM-DD HH:MM:SS'):
-- Today:    date LIKE (CURRENT_DATE::TEXT || '%')
-- Tomorrow: date LIKE ((CURRENT_DATE + INTERVAL '1 day')::DATE::TEXT || '%')
-- This week: date >= (CURRENT_DATE::TEXT || ' 00:00:00') AND date <= ((CURRENT_DATE + 6)::TEXT || ' 23:59:59')
-- Next week: date >= ((CURRENT_DATE + 7)::TEXT || ' 00:00:00') AND date <= ((CURRENT_DATE + 13)::TEXT || ' 23:59:59')
-- Specific date: date LIKE '2026-02-15%'
+DATE RULES (date column is TEXT, format 'YYYY-MM-DD', e.g. '2026-02-18'):
+- Today:      date = CURRENT_DATE::TEXT
+- Tomorrow:   date = (CURRENT_DATE + 1)::TEXT
+- Yesterday:  date = (CURRENT_DATE - 1)::TEXT
+- This week:  date >= CURRENT_DATE::TEXT AND date <= (CURRENT_DATE + 6)::TEXT
+- Next week:  date >= (CURRENT_DATE + 7)::TEXT AND date <= (CURRENT_DATE + 13)::TEXT
+- This month: date >= date_trunc('month', CURRENT_DATE)::DATE::TEXT AND date < (date_trunc('month', CURRENT_DATE) + INTERVAL '1 month')::DATE::TEXT
+- Specific:   date = '2026-02-18'
+- Named day (e.g. 'Monday'): use to_char(date::date, 'Day') ILIKE 'Monday%'
 
 RULES:
 - Output ONLY the SQL query, nothing else
@@ -181,11 +184,11 @@ def clean_sql(raw: str) -> str:
 
 
 def format_date(date_str: str) -> str:
-    """'2026-02-01 00:00:00' -> 'February 1st, 2026'"""
+    """'2026-02-18' or '2026-02-18 00:00:00' -> 'February 18th, 2026'"""
     if not date_str:
         return date_str
     try:
-        part = date_str.split(" ")[0]
+        part = str(date_str).split(" ")[0].split("T")[0]
         d = datetime.strptime(part, "%Y-%m-%d")
         day = d.day
         suffix = "th" if 10 <= day <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
@@ -206,7 +209,7 @@ def is_roster_question(text: str) -> bool:
 
 
 def get_available_dates() -> list[str]:
-    rows = run_sql("SELECT DISTINCT date FROM roster WHERE date NOT LIKE 'Unnamed%' ORDER BY date LIMIT 10")
+    rows = run_sql("SELECT DISTINCT date FROM roster ORDER BY date LIMIT 10")
     return [format_date(r["date"]) for r in rows if r.get("date")]
 
 
@@ -376,7 +379,7 @@ async def chat_completions(request: ChatRequest):
             # Step 2: Validate SQL
             if not sql or not sql.upper().startswith("SELECT"):
                 logger.warning("LLM returned invalid SQL, using safe fallback")
-                sql = "SELECT staff_name, shift, date FROM roster WHERE date NOT LIKE 'Unnamed%' ORDER BY date LIMIT 20"
+                sql = "SELECT staff_name, shift, date FROM roster ORDER BY date LIMIT 20"
 
             # Step 3: Execute SQL
             results = run_sql(sql)
@@ -439,7 +442,7 @@ async def chat_completions(request: ChatRequest):
 @app.get("/")
 @app.get("/health")
 async def health():
-    count = run_sql("SELECT COUNT(*) as cnt FROM roster WHERE date NOT LIKE 'Unnamed%'")
+    count = run_sql("SELECT COUNT(*) as cnt FROM roster")
     records = count[0]["cnt"] if count else "unknown"
     return {
         "status": "healthy",
@@ -466,17 +469,70 @@ async def list_models():
 
 @app.get("/debug/dates")
 async def debug_dates():
-    rows = run_sql("SELECT DISTINCT date FROM roster WHERE date NOT LIKE 'Unnamed%' ORDER BY date LIMIT 30")
-    count = run_sql("SELECT COUNT(*) as cnt FROM roster WHERE date NOT LIKE 'Unnamed%'")
+    # Total rows in table (no filter)
+    total = run_sql("SELECT COUNT(*) as cnt FROM roster")
+    total_count = total[0]["cnt"] if total else 0
+
+    # Rows where date looks like a valid date (starts with a digit)
+    valid = run_sql("SELECT COUNT(*) as cnt FROM roster WHERE date ~ '^[0-9]'")
+    valid_count = valid[0]["cnt"] if valid else 0
+
+    # Rows where date is null or empty
+    null_dates = run_sql("SELECT COUNT(*) as cnt FROM roster WHERE date IS NULL OR date = ''")
+    null_count = null_dates[0]["cnt"] if null_dates else 0
+
+    # All distinct raw date values (so we can see exactly what's in there)
+    raw_distinct = run_sql("SELECT DISTINCT date, COUNT(*) as cnt FROM roster GROUP BY date ORDER BY date LIMIT 50")
+
+    # Valid distinct dates only
+    valid_rows = run_sql("SELECT DISTINCT date FROM roster WHERE date ~ '^[0-9]' ORDER BY date LIMIT 50")
+
     return {
-        "total_records": count[0]["cnt"] if count else 0,
-        "dates": [format_date(r["date"]) for r in rows if r.get("date")],
+        "total_rows_in_table": total_count,
+        "valid_date_rows": valid_count,
+        "null_or_empty_date_rows": null_count,
+        "invalid_date_rows": total_count - valid_count - null_count,
+        "valid_dates_formatted": [format_date(r["date"]) for r in valid_rows if r.get("date")],
+        "all_distinct_raw_date_values": raw_distinct,  # raw so you can see exactly what's stored
     }
 
 @app.get("/debug/staff")
 async def debug_staff():
     rows = run_sql("SELECT DISTINCT staff_name FROM roster WHERE staff_name IS NOT NULL ORDER BY staff_name")
     return {"staff": [r["staff_name"] for r in rows if r.get("staff_name")]}
+
+
+@app.get("/debug/inspect")
+async def debug_inspect():
+    """Full table inspection - reveals actual column names, types, and raw sample rows.
+    Use this to diagnose wide-format vs long-format roster data."""
+
+    # All columns with their types
+    cols = run_sql("""
+        SELECT column_name, data_type, ordinal_position
+        FROM information_schema.columns
+        WHERE table_name = 'roster'
+        ORDER BY ordinal_position
+    """)
+
+    # First 5 raw rows - no filtering at all
+    sample = run_sql("SELECT * FROM roster LIMIT 5")
+
+    # Total row count
+    count = run_sql("SELECT COUNT(*) as cnt FROM roster")
+    total = count[0]["cnt"] if count else 0
+
+    # Wide vs long heuristic
+    num_cols = len(cols) if cols else 0
+    suspected_format = "WIDE (each date is its own column - needs unpivoting)" if num_cols > 8 else "LONG (date is a row value - correct format)"
+
+    return {
+        "total_rows": total,
+        "total_columns": num_cols,
+        "suspected_format": suspected_format,
+        "columns": cols,
+        "sample_rows": sample,
+    }
 
 # ================= ENTRYPOINT =================
 
