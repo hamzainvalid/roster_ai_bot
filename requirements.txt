@@ -5,5 +5,6 @@ requests
 langchain-community
 langchain
 langchain-openai
+langchain-chains
 openai
 SQLAlchemy
