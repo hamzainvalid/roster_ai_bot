@@ -21,21 +21,17 @@ DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 
 # ================= DEEPSEEK CONFIG =================
 
-try:
-    client = OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=DEEPSEEK_API_KEY,
-        default_headers={
-            "HTTP-Referer": "https://roster-ai-bot.onrender.com",
-            "X-Title": "Roster Chatbot",
-        }
-    )
-    logger.info("DeepSeek client initialized successfully")
-except Exception as e:
-    logger.error(f"Failed to initialize DeepSeek client: {e}")
-    client = None
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=DEEPSEEK_API_KEY,
+    default_headers={
+        "HTTP-Referer": "https://roster-ai-bot.onrender.com",  # Replace with your actual Render URL
+        "X-Title": "Roster Chatbot",
+    }
+)
 
-MODEL_NAME = "deepseek/deepseek-r1:free"
+# Use the free auto-router - this will use whatever free model is available
+MODEL_NAME = "openrouter/free"
 
 # ================= FASTAPI INIT =================
 
