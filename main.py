@@ -82,7 +82,7 @@ async def chat(req: ChatRequest):
         user_message = req.messages[-1].content
 
         prompt = SYSTEM_PROMPT + "\nQuestion: " + user_message
-        sql = llm(prompt).strip()
+        sql = llm.invoke(prompt).strip()
 
         if not sql.lower().startswith("select"):
             answer = "Only SELECT queries are allowed."
