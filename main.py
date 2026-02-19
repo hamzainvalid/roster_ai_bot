@@ -1,7 +1,8 @@
 import os
 import requests
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from pydantic import BaseModel
+from typing import List, Optional
 from langchain_openai import OpenAI
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
@@ -15,10 +16,6 @@ llm = OpenAI(
 )
 
 app = FastAPI()
-
-class Question(BaseModel):
-    question: str
-
 
 SYSTEM_PROMPT = """
 You are a SQL assistant.
@@ -41,9 +38,10 @@ Never invent data.
 Always query first.
 """
 
+# ================= SUPABASE EXEC =================
 
 def run_sql(sql):
-    r = requests.post(
+    response = requests.post(
         f"{SUPABASE_URL}/rest/v1/rpc/run_sql",
         headers={
             "apikey": SUPABASE_KEY,
@@ -52,19 +50,47 @@ def run_sql(sql):
         },
         json={"query": sql}
     )
-    return r.json()
+    return response.json()
 
+# ================= OPENAI FORMAT =================
 
-@app.post("/ask")
-def ask(q: Question):
+class Message(BaseModel):
+    role: str
+    content: str
 
-    prompt = SYSTEM_PROMPT + "\nQuestion: " + q.question
+class ChatRequest(BaseModel):
+    model: str
+    messages: List[Message]
+    temperature: Optional[float] = 0.0
 
-    sql = llm(prompt)
+@app.post("/v1/chat/completions")
+async def chat(req: ChatRequest):
 
-    result = run_sql(sql)
+    # Get latest user message
+    user_message = req.messages[-1].content
+
+    # Generate SQL
+    prompt = SYSTEM_PROMPT + "\nQuestion: " + user_message
+    sql = llm(prompt).strip()
+
+    # Safety check
+    if not sql.lower().startswith("select"):
+        answer = "Only SELECT queries are allowed."
+    else:
+        result = run_sql(sql)
+        answer = f"SQL:\n{sql}\n\nResult:\n{result}"
 
     return {
-        "sql": sql,
-        "result": result
+        "id": "chatcmpl-text2sql",
+        "object": "chat.completion",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": answer
+                },
+                "finish_reason": "stop"
+            }
+        ]
     }

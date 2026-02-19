@@ -1,7 +1,12 @@
 fastapi
 uvicorn
 pydantic
-langchain-openai
-langchain-core
+fastapi
+uvicorn
 requests
+langchain
+langchain-community
+google-generativeai
+pydantic
+langchain-openai
 python-dotenv
