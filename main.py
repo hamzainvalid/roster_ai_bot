@@ -3,7 +3,7 @@ import time
 import requests
 import re
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -11,7 +11,7 @@ from typing import List, Optional
 from openai import OpenAI
 import logging
 
-# ================= LOGGING CONFIG =================
+# ================= LOGGING =================
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -22,7 +22,7 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 
-# ================= DEEPSEEK CONFIG =================
+# ================= OPENROUTER CLIENT =================
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
@@ -35,9 +35,20 @@ client = OpenAI(
 
 MODEL_NAME = "openrouter/free"
 
-# ================= FASTAPI INIT =================
+# ================= SHIFT CODES =================
 
-app = FastAPI()
+SHIFT_MEANINGS = {
+    "D":   "Day shift",
+    "N":   "Night shift",
+    "A":   "Afternoon shift",
+    "NP":  "Night Phone (on-call)",
+    "AP":  "Afternoon Phone (on-call)",
+    "OFF": "Off duty / Day off"
+}
+
+# ================= FASTAPI =================
+
+app = FastAPI(title="Roster Chatbot API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -47,378 +58,156 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ================= SHIFT CODE MAPPINGS =================
+# ================= SUPABASE SQL RUNNER =================
 
-SHIFT_MEANINGS = {
-    "D": "Day shift",
-    "OFF": "Off duty",
-    "NP": "Night Phone (on-call)",
-    "N": "Night shift",
-    "A": "Afternoon shift",
-    "AP": "Afternoon Phone (on-call)"
-}
-
-SHIFT_DISPLAY = {
-    "D": "🌞 Day shift",
-    "OFF": "🏖️ Off duty",
-    "NP": "📞 Night Phone",
-    "N": "🌙 Night shift",
-    "A": "☀️ Afternoon shift",
-    "AP": "📞 Afternoon Phone"
-}
-
-
-# ================= DATABASE SCHEMA INFO =================
-
-def get_database_schema():
-    """Get the actual schema from your roster table"""
+def run_sql(sql: str) -> list:
+    """Execute a SQL query via Supabase RPC and return rows as a list of dicts."""
+    if not sql:
+        return []
     try:
-        schema_query = """
-        SELECT 
-            column_name, 
-            data_type 
-        FROM information_schema.columns 
-        WHERE table_name = 'roster'
-        ORDER BY ordinal_position;
-        """
-
         headers = {
             "apikey": SUPABASE_KEY,
             "Authorization": f"Bearer {SUPABASE_KEY}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
-
-        response = requests.post(
+        clean = sql.strip().rstrip(";")
+        logger.info(f"[SQL] {clean}")
+        resp = requests.post(
             f"{SUPABASE_URL}/rest/v1/rpc/run_sql",
             headers=headers,
-            json={"query": schema_query},
-            timeout=10
+            json={"query": clean},
+            timeout=30,
         )
-
-        if response.status_code == 200:
-            columns = response.json()
-            if columns is None:
-                columns = []
-
-            # Build schema string
-            schema_info = "Table: roster("
-            col_strings = []
-            for col in columns:
-                if col and isinstance(col, dict):
-                    if col.get('column_name') == 'date':
-                        col_strings.append(f"date TEXT (stores dates as YYYY-MM-DD strings)")
-                    else:
-                        col_strings.append(f"{col.get('column_name', 'unknown')} {col.get('data_type', 'unknown')}")
-            schema_info += ", ".join(col_strings)
-            schema_info += ")"
-
-            # Get distinct shift codes
-            sample_query = "SELECT DISTINCT shift FROM roster WHERE shift IS NOT NULL LIMIT 20;"
-            sample_response = requests.post(
-                f"{SUPABASE_URL}/rest/v1/rpc/run_sql",
-                headers=headers,
-                json={"query": sample_query},
-                timeout=10
-            )
-
-            shift_values = []
-            if sample_response.status_code == 200:
-                shifts = sample_response.json()
-                if shifts and isinstance(shifts, list):
-                    shift_values = [s['shift'] for s in shifts if s and isinstance(s, dict) and s.get('shift')]
-
-            return {
-                "schema": schema_info,
-                "shift_codes": shift_values if shift_values else ["D", "OFF", "NP", "N", "A", "AP"],
-                "shift_meanings": SHIFT_MEANINGS
-            }
-    except Exception as e:
-        logger.error(f"Error fetching schema: {e}")
-
-    # Fallback schema
-    return {
-        "schema": "Table: roster(staff_id TEXT, staff_name TEXT, date TEXT (stores dates as YYYY-MM-DD strings), shift TEXT)",
-        "shift_codes": ["D", "OFF", "NP", "N", "A", "AP"],
-        "shift_meanings": SHIFT_MEANINGS
-    }
-
-
-# Get schema at startup
-DB_SCHEMA = get_database_schema()
-logger.info(f"Database schema loaded: {DB_SCHEMA['schema']}")
-
-# ================= TEXT-TO-SQL PROMPT =================
-
-TEXT_TO_SQL_PROMPT = f"""
-You are a SQL expert. Convert natural language questions into PostgreSQL queries.
-
-DATABASE SCHEMA:
-{DB_SCHEMA['schema']}
-
-CRITICAL DATA TYPE NOTES:
-- The 'date' column is TEXT (stores dates as strings in 'YYYY-MM-DD' format)
-- The 'shift' column is TEXT
-- When comparing with dates, use string literals with single quotes: date = '2024-03-25'
-
-SHIFT CODES AND MEANINGS:
-{json.dumps(DB_SCHEMA['shift_meanings'], indent=2)}
-
-VALID SHIFT CODES: {', '.join(DB_SCHEMA['shift_codes'])}
-
-DATE HANDLING RULES:
-1. For "today": use CURRENT_DATE::TEXT
-2. For "tomorrow": use (CURRENT_DATE + 1)::TEXT
-3. For "yesterday": use (CURRENT_DATE - 1)::TEXT
-4. For "this week": BETWEEN CURRENT_DATE::TEXT AND (CURRENT_DATE + 7)::TEXT
-5. For "next week": BETWEEN (CURRENT_DATE + 7)::TEXT AND (CURRENT_DATE + 14)::TEXT
-6. For "this month": BETWEEN DATE_TRUNC('month', CURRENT_DATE)::TEXT AND (DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month - 1 day')::TEXT
-
-QUERY PATTERNS WITH EXAMPLES:
-
-=== INDIVIDUAL STAFF QUERIES ===
-Q: "What is John's shift today?"
-A: SELECT shift FROM roster WHERE staff_name = 'John' AND date = CURRENT_DATE::TEXT
-
-Q: "What shift is Sarah working tomorrow?"
-A: SELECT shift FROM roster WHERE staff_name = 'Sarah' AND date = (CURRENT_DATE + 1)::TEXT
-
-Q: "Is Mike on duty on Monday?"
-A: SELECT shift FROM roster WHERE staff_name = 'Mike' AND date = '2024-03-25'
-
-Q: "What are John's shifts this week?"
-A: SELECT date, shift FROM roster WHERE staff_name = 'John' AND date BETWEEN CURRENT_DATE::TEXT AND (CURRENT_DATE + 7)::TEXT ORDER BY date
-
-=== SHIFT-BASED QUERIES ===
-Q: "Who is working night shift tomorrow?"
-A: SELECT staff_name FROM roster WHERE shift = 'N' AND date = (CURRENT_DATE + 1)::TEXT
-
-Q: "Who's on day shift today?"
-A: SELECT staff_name FROM roster WHERE shift = 'D' AND date = CURRENT_DATE::TEXT
-
-Q: "List everyone on afternoon shift Monday"
-A: SELECT staff_name FROM roster WHERE shift = 'A' AND date = '2024-03-25'
-
-Q: "How many people are on night shift tonight?"
-A: SELECT COUNT(*) as count FROM roster WHERE shift = 'N' AND date = CURRENT_DATE::TEXT
-
-=== OFF-DUTY QUERIES ===
-Q: "Who is off tomorrow?"
-A: SELECT staff_name FROM roster WHERE shift = 'OFF' AND date = (CURRENT_DATE + 1)::TEXT
-
-Q: "Who's on leave this week?"
-A: SELECT staff_name, date FROM roster WHERE shift = 'OFF' AND date BETWEEN CURRENT_DATE::TEXT AND (CURRENT_DATE + 7)::TEXT ORDER BY date
-
-=== DATE RANGE QUERIES ===
-Q: "What's the roster for Monday?"
-A: SELECT staff_name, shift FROM roster WHERE date = '2024-03-25' ORDER BY shift
-
-Q: "Show me next week's schedule"
-A: SELECT staff_name, shift, date FROM roster WHERE date BETWEEN (CURRENT_DATE + 7)::TEXT AND (CURRENT_DATE + 14)::TEXT ORDER BY date, shift
-
-Q: "What does the roster look like this week?"
-A: SELECT staff_name, shift, date FROM roster WHERE date BETWEEN CURRENT_DATE::TEXT AND (CURRENT_DATE + 7)::TEXT ORDER BY date, shift
-
-=== COUNT AND STATISTICS ===
-Q: "How many people are working today?"
-A: SELECT COUNT(*) as count FROM roster WHERE date = CURRENT_DATE::TEXT
-
-Q: "What's the total number of staff on night shift this week?"
-A: SELECT COUNT(*) as count FROM roster WHERE shift = 'N' AND date BETWEEN CURRENT_DATE::TEXT AND (CURRENT_DATE + 7)::TEXT
-
-Q: "How many people are on leave tomorrow?"
-A: SELECT COUNT(*) as count FROM roster WHERE shift = 'OFF' AND date = (CURRENT_DATE + 1)::TEXT
-
-=== SPECIFIC DATE QUERIES ===
-Q: "Who's working on 2024-03-25?"
-A: SELECT staff_name, shift FROM roster WHERE date = '2024-03-25' ORDER BY shift
-
-Q: "What's the shift for staff ID 12345 on Friday?"
-A: SELECT shift FROM roster WHERE staff_id = '12345' AND date = '2024-03-29'
-
-=== COMBINATION QUERIES ===
-Q: "Show me all afternoon shifts this week"
-A: SELECT staff_name, date FROM roster WHERE shift = 'A' AND date BETWEEN CURRENT_DATE::TEXT AND (CURRENT_DATE + 7)::TEXT ORDER BY date
-
-Q: "Who is working both day and night shifts this week?"
-A: SELECT staff_name FROM roster WHERE shift IN ('D', 'N') AND date BETWEEN CURRENT_DATE::TEXT AND (CURRENT_DATE + 7)::TEXT GROUP BY staff_name
-
-Now convert this question to SQL. Return ONLY the SQL query, no explanations, no markdown, no semicolons:
-"""
-
-# ================= NATURAL LANGUAGE RESPONSE PROMPT =================
-
-NL_RESPONSE_PROMPT = """
-You are a friendly HR assistant. Based on the database results, answer the user's question naturally and conversationally.
-
-User question: {user_question}
-
-SQL query used: {sql_query}
-
-Database results: {results}
-
-SHIFT CODE MEANINGS:
-{json.dumps(DB_SCHEMA['shift_meanings'], indent=2)}
-
-RESPONSE GUIDELINES:
-1. Be warm, friendly, and professional
-2. Use full shift names (e.g., "Day shift" not "D")
-3. For "OFF", say "off duty", "on leave", or "taking the day off"
-4. Format dates nicely: "Monday, March 25th, 2024"
-5. For counts, use proper grammar: "is 1 person" vs "are 3 people"
-6. When listing multiple people, use commas and "and" naturally
-7. If no results found, politely suggest alternatives
-8. Add helpful context when appropriate
-
-RESPONSE PATTERNS BY QUERY TYPE:
-
-=== For individual staff queries ===
-- "John is working the Day shift today (Monday, March 25th)."
-- "Sarah is off duty tomorrow. She'll be back on Wednesday."
-- "I couldn't find Mike on the schedule for Friday. Would you like to check another day?"
-
-=== For shift-based queries ===
-- "Tomorrow's night shift is being handled by: David Chen, Sarah Smith, and Mike Johnson."
-- "There are 4 people on afternoon shift today: Alex, Jamie, Taylor, and Casey."
-- "No one is scheduled for night shift on Monday. Would you like to know about another shift?"
-
-=== For off-duty queries ===
-- "The following staff are off duty tomorrow: Emily Brown and James Wilson. They'll be back on Tuesday."
-- "Everyone is working today - no one is on leave."
-
-=== For date range queries ===
-- "Here's this week's roster:\n\nMonday (March 25th):\n- Day shift: John, Sarah\n- Afternoon shift: Mike, Emily\n- Night shift: David\n\nTuesday (March 26th):\n- Day shift: Sarah, Mike\n- Afternoon shift: Emily, David\n- Night shift: John"
-
-=== For count queries ===
-- "There are 12 people working today in total."
-- "5 staff members are on night shift this week."
-- "3 people will be off duty tomorrow."
-
-=== For empty results ===
-- "I couldn't find any matching records. The available dates in the system are: March 25th, March 26th, and March 27th. Would you like to check one of these?"
-
-Now provide a natural, friendly response:
-"""
-
-
-# ================= SUPABASE EXEC =================
-
-def run_sql(sql: str):
-    """Execute SQL query on Supabase"""
-    try:
-        if not sql:
+        if resp.status_code != 200:
+            logger.error(f"Supabase error {resp.status_code}: {resp.text}")
             return []
-
-        headers = {
-            "apikey": SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
-            "Content-Type": "application/json"
-        }
-
-        # Remove any trailing semicolons
-        clean_sql = sql.rstrip(';')
-
-        logger.info(f"Executing SQL: {clean_sql}")
-
-        response = requests.post(
-            f"{SUPABASE_URL}/rest/v1/rpc/run_sql",
-            headers=headers,
-            json={"query": clean_sql},
-            timeout=30
-        )
-
-        if response.status_code != 200:
-            logger.error(f"Supabase error: {response.status_code} - {response.text}")
-            return []
-
-        result = response.json()
-        return result if result is not None else []
+        result = resp.json()
+        return result if isinstance(result, list) else []
     except Exception as e:
-        logger.error(f"Exception in run_sql: {e}")
+        logger.error(f"run_sql exception: {e}")
         return []
 
+# ================= SCHEMA LOADER =================
 
-# ================= SQL CLEANING FUNCTION =================
-
-def clean_sql(sql_text):
-    """Clean and validate SQL query"""
-    if not sql_text:
-        return ""
-
-    # Remove markdown code blocks
-    if "```sql" in sql_text:
-        sql_text = sql_text.split("```sql")[1].split("```")[0]
-    elif "```" in sql_text:
-        sql_text = sql_text.split("```")[1].split("```")[0]
-
-    sql_text = sql_text.strip()
-
-    # Remove trailing semicolons
-    if sql_text.endswith(';'):
-        sql_text = sql_text[:-1]
-
-    # Extract SELECT statement
-    select_match = re.search(r'(SELECT.*)', sql_text, re.IGNORECASE | re.DOTALL)
-    if select_match:
-        sql_text = select_match.group(1)
-
-    return sql_text.strip()
-
-
-# ================= DATE FORMATTING HELPER =================
-
-def format_date(date_str):
-    """Convert YYYY-MM-DD to friendly format"""
+def load_schema() -> dict:
     try:
-        date_obj = datetime.strptime(date_str, '%Y-%m-%d')
-        return date_obj.strftime('%A, %B %d, %Y')
-    except:
+        col_resp = run_sql("""
+            SELECT column_name, data_type
+            FROM information_schema.columns
+            WHERE table_name = 'roster'
+            ORDER BY ordinal_position
+        """)
+        if col_resp:
+            cols = []
+            for c in col_resp:
+                name = c.get("column_name", "")
+                dtype = c.get("data_type", "")
+                if name == "date":
+                    cols.append("date TEXT (format: 'YYYY-MM-DD HH:MM:SS')")
+                else:
+                    cols.append(f"{name} {dtype}")
+            schema_str = "Table: roster(" + ", ".join(cols) + ")"
+        else:
+            raise ValueError("No columns returned")
+
+        shift_resp = run_sql("SELECT DISTINCT shift FROM roster WHERE shift IS NOT NULL AND shift != '' LIMIT 30")
+        shift_codes = [r["shift"] for r in shift_resp if r.get("shift")] if shift_resp else list(SHIFT_MEANINGS.keys())
+
+        return {"schema": schema_str, "shift_codes": shift_codes}
+    except Exception as e:
+        logger.warning(f"Schema load fallback: {e}")
+        return {
+            "schema": "Table: roster(staff_id TEXT, staff_name TEXT, date TEXT (format: 'YYYY-MM-DD HH:MM:SS'), shift TEXT)",
+            "shift_codes": list(SHIFT_MEANINGS.keys()),
+        }
+
+DB_SCHEMA = load_schema()
+logger.info(f"Schema: {DB_SCHEMA['schema']}")
+
+# ================= PROMPT TEMPLATES =================
+
+SYSTEM_SQL = f"""You are a PostgreSQL expert. Convert natural language into a single SQL SELECT query.
+
+SCHEMA:
+{DB_SCHEMA['schema']}
+
+SHIFT CODES:
+{json.dumps(SHIFT_MEANINGS, indent=2)}
+
+DATE RULES (date column is TEXT, format 'YYYY-MM-DD HH:MM:SS'):
+- Today:    date LIKE (CURRENT_DATE::TEXT || '%')
+- Tomorrow: date LIKE ((CURRENT_DATE + INTERVAL '1 day')::DATE::TEXT || '%')
+- This week: date >= (CURRENT_DATE::TEXT || ' 00:00:00') AND date <= ((CURRENT_DATE + 6)::TEXT || ' 23:59:59')
+- Next week: date >= ((CURRENT_DATE + 7)::TEXT || ' 00:00:00') AND date <= ((CURRENT_DATE + 13)::TEXT || ' 23:59:59')
+- Specific date: date LIKE '2026-02-15%'
+
+RULES:
+- Output ONLY the SQL query, nothing else
+- No markdown, no backticks, no semicolons, no explanations
+- Always use SELECT (never INSERT/UPDATE/DELETE)
+- Use ILIKE for case-insensitive name matching
+- When asked about a person, use: staff_name ILIKE '%name%'
+"""
+
+SYSTEM_NL = f"""You are a friendly, helpful HR assistant for a roster/scheduling system.
+Your job is to explain database results in clear, natural, conversational English.
+
+SHIFT MEANINGS:
+{json.dumps(SHIFT_MEANINGS, indent=2)}
+
+GUIDELINES:
+- Use full shift names (e.g. "Day shift", not "D")
+- Format dates nicely (e.g. "February 15th, 2026", not "2026-02-15 00:00:00")
+- "OFF" means the person is off duty or has a day off
+- Be warm, concise, and professional
+- If results are empty, say so helpfully and suggest alternatives
+- For lists of people, use natural language (commas + "and")
+- For counts: "there is 1 person" vs "there are 3 people"
+- If the question seems conversational (not roster-related), just chat naturally
+"""
+
+# ================= HELPERS =================
+
+def clean_sql(raw: str) -> str:
+    """Strip markdown and extract the SELECT statement."""
+    if not raw:
+        return ""
+    # Strip code fences
+    raw = re.sub(r"```(?:sql)?", "", raw, flags=re.IGNORECASE).strip()
+    raw = raw.rstrip(";").strip()
+    # Extract from SELECT onward
+    m = re.search(r"(SELECT\s.+)", raw, re.IGNORECASE | re.DOTALL)
+    return m.group(1).strip() if m else raw.strip()
+
+
+def format_date(date_str: str) -> str:
+    """'2026-02-01 00:00:00' -> 'February 1st, 2026'"""
+    if not date_str:
+        return date_str
+    try:
+        part = date_str.split(" ")[0]
+        d = datetime.strptime(part, "%Y-%m-%d")
+        day = d.day
+        suffix = "th" if 10 <= day <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+        return d.strftime(f"%B {day}{suffix}, %Y")
+    except Exception:
         return date_str
 
 
-# ================= DEBUG ENDPOINTS =================
-
-@app.get("/debug/dates")
-async def debug_dates():
-    """Check what dates exist in the database"""
-    try:
-        # Get all unique dates
-        sql = "SELECT DISTINCT date FROM roster ORDER BY date LIMIT 20;"
-        results = run_sql(sql)
-
-        # Get today's date
-        today_query = "SELECT CURRENT_DATE::TEXT as today;"
-        today_result = run_sql(today_query)
-        today = today_result[0]['today'] if today_result and len(today_result) > 0 else "unknown"
-
-        # Get tomorrow's date
-        tomorrow_query = "SELECT (CURRENT_DATE + 1)::TEXT as tomorrow;"
-        tomorrow_result = run_sql(tomorrow_query)
-        tomorrow = tomorrow_result[0]['tomorrow'] if tomorrow_result and len(tomorrow_result) > 0 else "unknown"
-
-        # Get total records
-        count_query = "SELECT COUNT(*) as count FROM roster;"
-        count_result = run_sql(count_query)
-        total_records = count_result[0]['count'] if count_result and len(count_result) > 0 else 0
-
-        return {
-            "today": today,
-            "tomorrow": tomorrow,
-            "total_records": total_records,
-            "dates_in_db": [d['date'] for d in results] if results else []
-        }
-    except Exception as e:
-        return {"error": str(e)}
+def is_roster_question(text: str) -> bool:
+    """Heuristic: does this message relate to roster/shifts/staff?"""
+    keywords = [
+        "who", "shift", "working", "roster", "schedule", "off", "today",
+        "tomorrow", "week", "night", "day", "afternoon", "on call", "staff",
+        "when", "what", "show", "list", "how many", "available", "leave"
+    ]
+    lower = text.lower()
+    return any(k in lower for k in keywords)
 
 
-@app.get("/debug/staff")
-async def debug_staff():
-    """List all staff members"""
-    try:
-        sql = "SELECT DISTINCT staff_name FROM roster ORDER BY staff_name LIMIT 50;"
-        results = run_sql(sql)
-        return {"staff_members": [s['staff_name'] for s in results] if results else []}
-    except Exception as e:
-        return {"error": str(e)}
+def get_available_dates() -> list[str]:
+    rows = run_sql("SELECT DISTINCT date FROM roster WHERE date NOT LIKE 'Unnamed%' ORDER BY date LIMIT 10")
+    return [format_date(r["date"]) for r in rows if r.get("date")]
 
 
 # ================= PYDANTIC MODELS =================
@@ -427,336 +216,207 @@ class Message(BaseModel):
     role: str
     content: str
 
-
-class ChatCompletionRequest(BaseModel):
-    model: str
+class ChatRequest(BaseModel):
+    model: str = "roster-assistant"
     messages: List[Message]
     temperature: Optional[float] = 0.7
 
+# ================= BUILT-IN COMMANDS =================
 
-# ================= HEALTH CHECK =================
+HELP_TEXT = """
+**🤖 Roster Chatbot — Help**
 
-@app.get("/")
-@app.get("/health")
-async def health_check():
-    return {
-        "status": "healthy",
-        "database_schema": DB_SCHEMA['schema'],
-        "shift_codes": DB_SCHEMA['shift_codes'],
-        "deepseek_configured": bool(DEEPSEEK_API_KEY)
-    }
+Ask me anything about the staff roster in plain English. Examples:
 
+**Shifts & Schedules**
+- "Who is working today?"
+- "Who's on night shift tomorrow?"
+- "Show me the roster for next week"
+- "What is John's shift on Friday?"
 
-# ================= MODEL LISTING ENDPOINTS =================
+**Off Duty**
+- "Who is off tomorrow?"
+- "How many people are on leave this week?"
 
-@app.get("/v1/models")
-@app.get("/models")
-async def list_models():
-    """OpenAI compatible model listing"""
-    current_time = int(time.time())
+**Specific Staff**
+- "Is Sarah working tonight?"
+- "What shifts does Mike have this week?"
 
-    return {
-        "object": "list",
-        "data": [
-            {
-                "id": "roster-assistant",
-                "object": "model",
-                "created": current_time,
-                "owned_by": "organization",
-                "permission": [{
-                    "id": "modelperm-roster",
-                    "object": "model_permission",
-                    "created": current_time,
-                    "allow_create_engine": False,
-                    "allow_sampling": True,
-                    "allow_logprobs": False,
-                    "allow_search_indices": False,
-                    "allow_view": True,
-                    "allow_fine_tuning": False,
-                    "organization": "*",
-                    "group": None,
-                    "is_blocking": False
-                }],
-                "root": "roster-assistant",
-                "parent": None
-            }
-        ]
-    }
+**Counts**
+- "How many people are on day shift today?"
+
+**Debug Commands**
+- `debug dates` — Show all dates in the database
+- `debug staff` — List all staff members
+- `debug shifts` — Show shift code meanings
+- `help` — Show this message
+
+Just ask naturally — I'll handle the rest! 😊
+""".strip()
 
 
-@app.get("/api/tags")
-async def list_ollama_models():
-    """Ollama-compatible model listing for OpenWebUI"""
-    return {
-        "models": [
-            {
-                "name": "roster-assistant:latest",
-                "model": "roster-assistant",
-                "modified_at": "2024-01-01T00:00:00Z",
-                "size": 1000000000,
-                "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-                "details": {
-                    "format": "gguf",
-                    "family": "llama",
-                    "families": ["llama"],
-                    "parameter_size": "7B",
-                    "quantization_level": "Q4_0"
-                }
-            }
-        ]
-    }
+async def handle_builtin(cmd: str) -> Optional[str]:
+    cmd = cmd.strip().lower()
 
+    if cmd == "help":
+        return HELP_TEXT
+
+    if cmd == "debug dates":
+        rows = run_sql("SELECT DISTINCT date FROM roster WHERE date NOT LIKE 'Unnamed%' ORDER BY date LIMIT 30")
+        if not rows:
+            return "No dates found in the database."
+        dates = [format_date(r["date"]) for r in rows if r.get("date")]
+        count_rows = run_sql("SELECT COUNT(*) as cnt FROM roster WHERE date NOT LIKE 'Unnamed%'")
+        total = count_rows[0]["cnt"] if count_rows else "?"
+        return f"**📅 Dates in Database** ({total} records)\n\n" + "\n".join(f"• {d}" for d in dates)
+
+    if cmd == "debug staff":
+        rows = run_sql("SELECT DISTINCT staff_name FROM roster WHERE staff_name IS NOT NULL AND staff_name != '' ORDER BY staff_name LIMIT 100")
+        if not rows:
+            return "No staff found in the database."
+        names = [r["staff_name"] for r in rows if r.get("staff_name")]
+        return f"**👥 Staff Members ({len(names)} total)**\n\n" + ", ".join(names)
+
+    if cmd == "debug shifts":
+        lines = [f"• **{k}** — {v}" for k, v in SHIFT_MEANINGS.items()]
+        return "**🔄 Shift Code Meanings**\n\n" + "\n".join(lines)
+
+    return None  # Not a built-in command
+
+# ================= CORE PIPELINE =================
+
+def text_to_sql(question: str, history: list[dict]) -> str:
+    """Use the LLM to convert a natural language question to SQL."""
+    messages = [{"role": "system", "content": SYSTEM_SQL}]
+    # Include recent conversation context (last 4 turns) for follow-up questions
+    for msg in history[-8:]:
+        messages.append(msg)
+    messages.append({"role": "user", "content": f"Convert to SQL: {question}"})
+
+    resp = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        temperature=0.1,
+        max_tokens=400,
+    )
+    return resp.choices[0].message.content.strip()
+
+
+def sql_to_text(question: str, sql: str, results: list, history: list[dict]) -> str:
+    """Use the LLM to convert SQL results back to natural language."""
+    results_str = json.dumps(results, default=str)
+
+    user_prompt = (
+        f"The user asked: \"{question}\"\n\n"
+        f"SQL used: {sql}\n\n"
+        f"Results ({len(results)} rows): {results_str}\n\n"
+        f"Please answer the user's question naturally based on these results."
+    )
+
+    messages = [{"role": "system", "content": SYSTEM_NL}]
+    for msg in history[-6:]:
+        messages.append(msg)
+    messages.append({"role": "user", "content": user_prompt})
+
+    resp = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        temperature=0.4,
+        max_tokens=600,
+    )
+    return resp.choices[0].message.content.strip()
+
+
+def chat_freely(question: str, history: list[dict]) -> str:
+    """Handle non-roster conversational messages."""
+    messages = [{"role": "system", "content": SYSTEM_NL}]
+    for msg in history[-6:]:
+        messages.append(msg)
+    messages.append({"role": "user", "content": question})
+
+    resp = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        temperature=0.7,
+        max_tokens=400,
+    )
+    return resp.choices[0].message.content.strip()
 
 # ================= CHAT ENDPOINT =================
 
 @app.post("/v1/chat/completions")
 @app.post("/chat/completions")
-async def chat_completions(request: ChatCompletionRequest):
+async def chat_completions(request: ChatRequest):
     try:
-        # Get user message
-        user_message = next((msg.content for msg in reversed(request.messages) if msg.role == "user"), "Hello")
+        # Extract the latest user message
+        user_message = ""
+        history = []
+        for msg in request.messages:
+            if msg.role == "user":
+                user_message = msg.content
+            history.append({"role": msg.role, "content": msg.content})
+
+        if not user_message:
+            user_message = "Hello"
+
         logger.info(f"User: {user_message}")
 
-        # Handle debug commands
-        if user_message.lower() == "debug dates":
-            debug_info = await debug_dates()
-            return {
-                "choices": [{
-                    "message": {
-                        "role": "assistant",
-                        "content": f"📊 **Database Debug Info**\n\n```json\n{json.dumps(debug_info, indent=2)}\n```"
-                    }
-                }]
-            }
+        # --- Built-in commands ---
+        builtin_response = await handle_builtin(user_message)
+        if builtin_response:
+            answer = builtin_response
+        elif is_roster_question(user_message):
+            # --- TEXT → SQL → EXECUTE → NL ---
 
-        if user_message.lower() == "debug staff":
-            debug_info = await debug_staff()
-            return {
-                "choices": [{
-                    "message": {
-                        "role": "assistant",
-                        "content": f"👥 **Staff Members**\n\n{', '.join(debug_info.get('staff_members', []))}"
-                    }
-                }]
-            }
+            # Step 1: Generate SQL
+            raw_sql = text_to_sql(user_message, history[:-1])
+            sql = clean_sql(raw_sql)
+            logger.info(f"Generated SQL: {sql}")
 
-        if user_message.lower() == "help":
-            help_text = """
-**🤖 Roster Chatbot - Help**
+            # Step 2: Validate SQL
+            if not sql or not sql.upper().startswith("SELECT"):
+                logger.warning("LLM returned invalid SQL, using safe fallback")
+                sql = "SELECT staff_name, shift, date FROM roster WHERE date NOT LIKE 'Unnamed%' ORDER BY date LIMIT 20"
 
-You can ask me anything about the staff roster! Here are some examples:
+            # Step 3: Execute SQL
+            results = run_sql(sql)
+            logger.info(f"Rows returned: {len(results)}")
 
-**Individual Staff:**
-- "What is John's shift today?"
-- "Is Sarah working tomorrow?"
-- "What are Mike's shifts this week?"
-- "Show me Emily's schedule for Monday"
-
-**Shift-Based:**
-- "Who is working night shift tonight?"
-- "Who's on day shift tomorrow?"
-- "List everyone on afternoon shift Friday"
-- "How many people are on night shift this week?"
-
-**Off Duty:**
-- "Who is off tomorrow?"
-- "Who's on leave this week?"
-- "Is anyone off on Monday?"
-
-**Date Range:**
-- "What's the roster for today?"
-- "Show me next week's schedule"
-- "What does this week look like?"
-- "Who's working on 2024-03-25?"
-
-**Counts & Stats:**
-- "How many people are working today?"
-- "Total staff on night shift this week"
-- "Number of people on leave tomorrow"
-
-**Debug Commands:**
-- "debug dates" - Show available dates
-- "debug staff" - List all staff members
-- "help" - Show this help message
-
-Just ask naturally and I'll help you out! 😊
-"""
-            return {
-                "choices": [{
-                    "message": {
-                        "role": "assistant",
-                        "content": help_text
-                    }
-                }]
-            }
-
-        # First, check if there's any data at all
-        check_data_sql = "SELECT COUNT(*) as count FROM roster;"
-        count_result = run_sql(check_data_sql)
-        total_records = count_result[0]['count'] if count_result and len(count_result) > 0 else 0
-
-        if total_records == 0:
-            return {
-                "choices": [{
-                    "message": {
-                        "role": "assistant",
-                        "content": "📭 The roster database is empty. Please upload some data first using the upload script."
-                    }
-                }]
-            }
-
-        # STEP 1: TEXT-TO-SQL - Generate SQL from natural language
-        sql_prompt = TEXT_TO_SQL_PROMPT + f"\nQ: {user_message}\nA:"
-
-        sql_response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system",
-                 "content": "You are a SQL expert. Generate only SQL queries without explanations or semicolons."},
-                {"role": "user", "content": sql_prompt}
-            ],
-            temperature=0.1,
-            max_tokens=300
-        )
-
-        raw_sql = sql_response.choices[0].message.content.strip()
-        logger.info(f"Raw SQL from AI: {raw_sql}")
-
-        # Clean the SQL
-        sql = clean_sql(raw_sql)
-        logger.info(f"Cleaned SQL: {sql}")
-
-        # STEP 2: EXECUTE SQL
-        if not sql or not sql.upper().strip().startswith("SELECT"):
-            logger.warning(f"Invalid SQL generated, using fallback")
-
-            # Comprehensive fallback logic
-            user_message_lower = user_message.lower()
-
-            # Extract potential staff name (capitalized words)
-            words = user_message.split()
-            potential_name = None
-            for word in words:
-                if word and word[0].isupper() and len(word) > 1 and word.lower() not in ['who', 'what', 'when', 'where',
-                                                                                         'why', 'how', 'today',
-                                                                                         'tomorrow', 'yesterday', 'is',
-                                                                                         'are', 'on', 'for', 'the',
-                                                                                         'this', 'next', 'last',
-                                                                                         'monday', 'tuesday',
-                                                                                         'wednesday', 'thursday',
-                                                                                         'friday', 'saturday',
-                                                                                         'sunday']:
-                    potential_name = word
-                    break
-
-            # Pattern matching
-            if "off" in user_message_lower and "tomorrow" in user_message_lower:
-                sql = "SELECT staff_name FROM roster WHERE shift = 'OFF' AND date = (CURRENT_DATE + 1)::TEXT ORDER BY staff_name"
-            elif "off" in user_message_lower and "today" in user_message_lower:
-                sql = "SELECT staff_name FROM roster WHERE shift = 'OFF' AND date = CURRENT_DATE::TEXT ORDER BY staff_name"
-            elif "off" in user_message_lower and "this week" in user_message_lower:
-                sql = "SELECT staff_name, date FROM roster WHERE shift = 'OFF' AND date BETWEEN CURRENT_DATE::TEXT AND (CURRENT_DATE + 7)::TEXT ORDER BY date"
-            elif "off" in user_message_lower and "next week" in user_message_lower:
-                sql = "SELECT staff_name, date FROM roster WHERE shift = 'OFF' AND date BETWEEN (CURRENT_DATE + 7)::TEXT AND (CURRENT_DATE + 14)::TEXT ORDER BY date"
-            elif "night shift" in user_message_lower or "night" in user_message_lower:
-                if "tomorrow" in user_message_lower:
-                    sql = "SELECT staff_name FROM roster WHERE shift = 'N' AND date = (CURRENT_DATE + 1)::TEXT ORDER BY staff_name"
-                elif "today" in user_message_lower:
-                    sql = "SELECT staff_name FROM roster WHERE shift = 'N' AND date = CURRENT_DATE::TEXT ORDER BY staff_name"
-                elif "this week" in user_message_lower:
-                    sql = "SELECT staff_name, date FROM roster WHERE shift = 'N' AND date BETWEEN CURRENT_DATE::TEXT AND (CURRENT_DATE + 7)::TEXT ORDER BY date"
-                elif "next week" in user_message_lower:
-                    sql = "SELECT staff_name, date FROM roster WHERE shift = 'N' AND date BETWEEN (CURRENT_DATE + 7)::TEXT AND (CURRENT_DATE + 14)::TEXT ORDER BY date"
-                else:
-                    sql = "SELECT staff_name FROM roster WHERE shift = 'N' AND date = CURRENT_DATE::TEXT ORDER BY staff_name"
-            elif "afternoon" in user_message_lower:
-                if "tomorrow" in user_message_lower:
-                    sql = "SELECT staff_name FROM roster WHERE shift = 'A' AND date = (CURRENT_DATE + 1)::TEXT ORDER BY staff_name"
-                elif "today" in user_message_lower:
-                    sql = "SELECT staff_name FROM roster WHERE shift = 'A' AND date = CURRENT_DATE::TEXT ORDER BY staff_name"
-                elif "this week" in user_message_lower:
-                    sql = "SELECT staff_name, date FROM roster WHERE shift = 'A' AND date BETWEEN CURRENT_DATE::TEXT AND (CURRENT_DATE + 7)::TEXT ORDER BY date"
-                else:
-                    sql = "SELECT staff_name FROM roster WHERE shift = 'A' AND date = CURRENT_DATE::TEXT ORDER BY staff_name"
-            elif "day shift" in user_message_lower or "day" in user_message_lower:
-                if "tomorrow" in user_message_lower:
-                    sql = "SELECT staff_name FROM roster WHERE shift = 'D' AND date = (CURRENT_DATE + 1)::TEXT ORDER BY staff_name"
-                elif "today" in user_message_lower:
-                    sql = "SELECT staff_name FROM roster WHERE shift = 'D' AND date = CURRENT_DATE::TEXT ORDER BY staff_name"
-                elif "this week" in user_message_lower:
-                    sql = "SELECT staff_name, date FROM roster WHERE shift = 'D' AND date BETWEEN CURRENT_DATE::TEXT AND (CURRENT_DATE + 7)::TEXT ORDER BY date"
-                else:
-                    sql = "SELECT staff_name FROM roster WHERE shift = 'D' AND date = CURRENT_DATE::TEXT ORDER BY staff_name"
-            elif "how many" in user_message_lower or "count" in user_message_lower or "total" in user_message_lower:
-                if "today" in user_message_lower:
-                    sql = "SELECT COUNT(*) as count FROM roster WHERE date = CURRENT_DATE::TEXT"
-                elif "tomorrow" in user_message_lower:
-                    sql = "SELECT COUNT(*) as count FROM roster WHERE date = (CURRENT_DATE + 1)::TEXT"
-                elif "night" in user_message_lower and "this week" in user_message_lower:
-                    sql = "SELECT COUNT(*) as count FROM roster WHERE shift = 'N' AND date BETWEEN CURRENT_DATE::TEXT AND (CURRENT_DATE + 7)::TEXT"
-                elif "off" in user_message_lower and "tomorrow" in user_message_lower:
-                    sql = "SELECT COUNT(*) as count FROM roster WHERE shift = 'OFF' AND date = (CURRENT_DATE + 1)::TEXT"
-                else:
-                    sql = "SELECT COUNT(*) as count FROM roster"
-            elif potential_name and ("today" in user_message_lower or "tomorrow" in user_message_lower):
-                if "tomorrow" in user_message_lower:
-                    sql = f"SELECT shift FROM roster WHERE staff_name = '{potential_name}' AND date = (CURRENT_DATE + 1)::TEXT"
-                else:
-                    sql = f"SELECT shift FROM roster WHERE staff_name = '{potential_name}' AND date = CURRENT_DATE::TEXT"
-            elif potential_name and (
-                    "monday" in user_message_lower or "tuesday" in user_message_lower or "wednesday" in user_message_lower or "thursday" in user_message_lower or "friday" in user_message_lower):
-                # This would need date calculation - for now, use a generic approach
-                sql = f"SELECT date, shift FROM roster WHERE staff_name = '{potential_name}' ORDER BY date LIMIT 5"
-            elif "this week" in user_message_lower:
-                sql = "SELECT staff_name, shift, date FROM roster WHERE date BETWEEN CURRENT_DATE::TEXT AND (CURRENT_DATE + 7)::TEXT ORDER BY date, shift"
-            elif "next week" in user_message_lower:
-                sql = "SELECT staff_name, shift, date FROM roster WHERE date BETWEEN (CURRENT_DATE + 7)::TEXT AND (CURRENT_DATE + 14)::TEXT ORDER BY date, shift"
-            else:
-                # Default to showing recent data
-                sql = "SELECT staff_name, shift, date FROM roster WHERE date >= CURRENT_DATE::TEXT ORDER BY date LIMIT 10"
-
-        logger.info(f"Final SQL: {sql}")
-
-        # Execute the SQL
-        results = run_sql(sql)
-        logger.info(f"Results count: {len(results) if isinstance(results, list) else 0}")
-
-        # STEP 3: CONVERT RESULTS TO NATURAL LANGUAGE
-        if isinstance(results, list):
-            if len(results) == 0:
-                # Get available dates to suggest
-                date_sql = "SELECT DISTINCT date FROM roster ORDER BY date LIMIT 5;"
-                date_results = run_sql(date_sql)
-
-                if date_results and len(date_results) > 0:
-                    available_dates = [format_date(d['date']) for d in date_results if d.get('date')]
-                    dates_str = ", ".join(available_dates)
-                    answer = f"I couldn't find any records matching your query. The available dates in the system are: {dates_str}. Would you like to check one of these dates instead?"
-                else:
-                    answer = f"I couldn't find any records matching your query about '{user_message}'. Try asking 'help' to see example queries."
-            else:
-                nl_prompt = NL_RESPONSE_PROMPT.format(
-                    user_question=user_message,
-                    sql_query=sql,
-                    results=json.dumps(results, default=str)
+            # Step 4: Handle empty results
+            if not results:
+                available = get_available_dates()
+                dates_hint = ""
+                if available:
+                    dates_hint = f" The roster currently has data for: {', '.join(available[:5])}."
+                answer = (
+                    f"I couldn't find any matching records for your query.{dates_hint} "
+                    f"Try rephrasing, or type `debug dates` to see what's available."
                 )
-
-                nl_response = client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=[
-                        {"role": "system",
-                         "content": "You are a friendly HR assistant who explains roster data conversationally."},
-                        {"role": "user", "content": nl_prompt}
-                    ],
-                    temperature=0.3,
-                    max_tokens=500
-                )
-
-                answer = nl_response.choices[0].message.content
+            else:
+                # Step 5: SQL results → Natural language
+                answer = sql_to_text(user_message, sql, results, history[:-1])
         else:
-            answer = "I had trouble querying the database. Please try again with a different question."
+            # --- Conversational / non-roster message ---
+            answer = chat_freely(user_message, history[:-1])
 
-        # Return OpenAI compatible response
+        logger.info(f"Answer: {answer[:120]}...")
+
+        return {
+            "id": f"chatcmpl-{int(time.time())}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": "roster-assistant",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": answer},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+
+    except Exception as e:
+        logger.error(f"Chat error: {e}", exc_info=True)
         return {
             "id": f"chatcmpl-{int(time.time())}",
             "object": "chat.completion",
@@ -767,27 +427,60 @@ Just ask naturally and I'll help you out! 😊
                     "index": 0,
                     "message": {
                         "role": "assistant",
-                        "content": answer
+                        "content": "Sorry, I ran into an error. Please try again or type `help` for guidance.",
                     },
-                    "finish_reason": "stop"
+                    "finish_reason": "stop",
                 }
-            ]
+            ],
         }
 
-    except Exception as e:
-        logger.error(f"Error: {e}", exc_info=True)
-        return {
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": f"I encountered an error: {str(e)}. Please try again or ask for 'help'."
-                }
-            }]
-        }
+# ================= UTILITY ENDPOINTS =================
 
+@app.get("/")
+@app.get("/health")
+async def health():
+    count = run_sql("SELECT COUNT(*) as cnt FROM roster WHERE date NOT LIKE 'Unnamed%'")
+    records = count[0]["cnt"] if count else "unknown"
+    return {
+        "status": "healthy",
+        "records": records,
+        "schema": DB_SCHEMA["schema"],
+        "shift_codes": DB_SCHEMA["shift_codes"],
+        "model": MODEL_NAME,
+    }
+
+@app.get("/v1/models")
+@app.get("/models")
+async def list_models():
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "roster-assistant",
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "organization",
+            }
+        ],
+    }
+
+@app.get("/debug/dates")
+async def debug_dates():
+    rows = run_sql("SELECT DISTINCT date FROM roster WHERE date NOT LIKE 'Unnamed%' ORDER BY date LIMIT 30")
+    count = run_sql("SELECT COUNT(*) as cnt FROM roster WHERE date NOT LIKE 'Unnamed%'")
+    return {
+        "total_records": count[0]["cnt"] if count else 0,
+        "dates": [format_date(r["date"]) for r in rows if r.get("date")],
+    }
+
+@app.get("/debug/staff")
+async def debug_staff():
+    rows = run_sql("SELECT DISTINCT staff_name FROM roster WHERE staff_name IS NOT NULL ORDER BY staff_name")
+    return {"staff": [r["staff_name"] for r in rows if r.get("staff_name")]}
+
+# ================= ENTRYPOINT =================
 
 # if __name__ == "__main__":
 #     import uvicorn
-#
 #     port = int(os.environ.get("PORT", 10000))
 #     uvicorn.run(app, host="0.0.0.0", port=port)
