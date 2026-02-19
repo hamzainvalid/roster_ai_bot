@@ -27,7 +27,7 @@ client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=DEEPSEEK_API_KEY,
     default_headers={
-        "HTTP-Referer": "https://roster-ai-bot.onrender.com",  # Replace with your actual Render URL
+        "HTTP-Referer": "https://your-render-app.onrender.com",
         "X-Title": "Roster Chatbot",
     }
 )
@@ -76,15 +76,18 @@ def get_database_schema():
 
         if response.status_code == 200:
             columns = response.json()
+            if columns is None:
+                columns = []
 
             # Build schema string with explicit note about date being TEXT
             schema_info = "Table: roster("
             col_strings = []
             for col in columns:
-                if col['column_name'] == 'date':
-                    col_strings.append(f"date TEXT (stores dates as YYYY-MM-DD strings)")
-                else:
-                    col_strings.append(f"{col['column_name']} {col['data_type']}")
+                if col and isinstance(col, dict):
+                    if col.get('column_name') == 'date':
+                        col_strings.append(f"date TEXT (stores dates as YYYY-MM-DD strings)")
+                    else:
+                        col_strings.append(f"{col.get('column_name', 'unknown')} {col.get('data_type', 'unknown')}")
             schema_info += ", ".join(col_strings)
             schema_info += ")"
 
@@ -100,7 +103,8 @@ def get_database_schema():
             shift_values = []
             if sample_response.status_code == 200:
                 shifts = sample_response.json()
-                shift_values = [s['shift'] for s in shifts if s and 'shift' in s]
+                if shifts and isinstance(shifts, list):
+                    shift_values = [s['shift'] for s in shifts if s and isinstance(s, dict) and s.get('shift')]
 
             return {
                 "schema": schema_info,
@@ -229,6 +233,9 @@ Response:
 def run_sql(sql: str):
     """Execute SQL query on Supabase"""
     try:
+        if not sql:
+            return {"error": "Empty SQL query"}
+
         headers = {
             "apikey": SUPABASE_KEY,
             "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -249,12 +256,16 @@ def run_sql(sql: str):
 
         if response.status_code != 200:
             logger.error(f"Supabase error: {response.status_code} - {response.text}")
-            return {"error": response.text}
+            return []  # Return empty list instead of error dict
 
-        return response.json()
+        result = response.json()
+        # If result is None, return empty list
+        if result is None:
+            return []
+        return result
     except Exception as e:
         logger.error(f"Exception in run_sql: {e}")
-        return {"error": str(e)}
+        return []  # Return empty list on error
 
 
 # ================= SQL CLEANING FUNCTION =================
@@ -422,10 +433,11 @@ async def chat_completions(request: ChatCompletionRequest):
                     # Try to extract name
                     words = user_message.split()
                     for word in words:
-                        if word[0].isupper() and len(word) > 1 and word.lower() not in ['who', 'what', 'when', 'where',
-                                                                                        'why', 'how', 'today',
-                                                                                        'tomorrow', 'yesterday', 'is',
-                                                                                        'are', 'on', 'for']:
+                        if word and word[0].isupper() and len(word) > 1 and word.lower() not in ['who', 'what', 'when',
+                                                                                                 'where', 'why', 'how',
+                                                                                                 'today', 'tomorrow',
+                                                                                                 'yesterday', 'is',
+                                                                                                 'are', 'on', 'for']:
                             sql = f"SELECT shift FROM roster WHERE staff_name = '{word}' AND date = CURRENT_DATE::TEXT"
                             break
             elif "tomorrow" in user_message_lower:
@@ -435,10 +447,11 @@ async def chat_completions(request: ChatCompletionRequest):
                     # Try to extract name
                     words = user_message.split()
                     for word in words:
-                        if word[0].isupper() and len(word) > 1 and word.lower() not in ['who', 'what', 'when', 'where',
-                                                                                        'why', 'how', 'today',
-                                                                                        'tomorrow', 'yesterday', 'is',
-                                                                                        'are', 'on', 'for']:
+                        if word and word[0].isupper() and len(word) > 1 and word.lower() not in ['who', 'what', 'when',
+                                                                                                 'where', 'why', 'how',
+                                                                                                 'today', 'tomorrow',
+                                                                                                 'yesterday', 'is',
+                                                                                                 'are', 'on', 'for']:
                             sql = f"SELECT shift FROM roster WHERE staff_name = '{word}' AND date = (CURRENT_DATE + 1)::TEXT"
                             break
             elif "night" in user_message_lower:
@@ -462,14 +475,14 @@ async def chat_completions(request: ChatCompletionRequest):
 
         # Execute the SQL
         results = run_sql(sql)
-        logger.info(f"Results: {str(results)[:200]}...")
+        logger.info(
+            f"Results type: {type(results)}, length: {len(results) if isinstance(results, list) else 'not a list'}")
 
         # STEP 3: CONVERT RESULTS TO NATURAL LANGUAGE
-        if results and not isinstance(results, dict) or "error" not in results:
-            if isinstance(results, list) and len(results) == 0:
+        # Check if results is a list (successful query)
+        if isinstance(results, list):
+            if len(results) == 0:
                 answer = f"I couldn't find any records matching your query about '{user_message}'. Would you like to ask about something else?"
-            elif isinstance(results, dict) and "error" in results:
-                answer = f"I had trouble querying the database. Error: {results['error']}"
             else:
                 nl_prompt = NL_RESPONSE_PROMPT.format(
                     user_question=user_message,
@@ -490,7 +503,8 @@ async def chat_completions(request: ChatCompletionRequest):
 
                 answer = nl_response.choices[0].message.content
         else:
-            answer = f"I had trouble querying the database. Error: {results.get('error', 'Unknown error')}"
+            # Results is not a list, something went wrong
+            answer = f"I had trouble querying the database. Please try again with a different question."
 
         # Return OpenAI compatible response
         return {
