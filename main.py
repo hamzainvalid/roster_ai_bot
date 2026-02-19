@@ -32,7 +32,7 @@ client = OpenAI(
     }
 )
 
-MODEL_NAME = "openrouter/free"  # Working free model
+MODEL_NAME = "openrouter/free"
 
 # ================= FASTAPI INIT =================
 
@@ -76,12 +76,20 @@ def get_database_schema():
 
         if response.status_code == 200:
             columns = response.json()
+
+            # Build schema string with explicit note about date being TEXT
             schema_info = "Table: roster("
-            schema_info += ", ".join([f"{col['column_name']} {col['data_type']}" for col in columns])
+            col_strings = []
+            for col in columns:
+                if col['column_name'] == 'date':
+                    col_strings.append(f"date TEXT (stores dates as YYYY-MM-DD strings)")
+                else:
+                    col_strings.append(f"{col['column_name']} {col['data_type']}")
+            schema_info += ", ".join(col_strings)
             schema_info += ")"
 
             # Get distinct shift codes
-            sample_query = "SELECT DISTINCT shift FROM roster LIMIT 10;"
+            sample_query = "SELECT DISTINCT shift FROM roster WHERE shift IS NOT NULL LIMIT 20;"
             sample_response = requests.post(
                 f"{SUPABASE_URL}/rest/v1/rpc/run_sql",
                 headers=headers,
@@ -92,7 +100,7 @@ def get_database_schema():
             shift_values = []
             if sample_response.status_code == 200:
                 shifts = sample_response.json()
-                shift_values = [s['shift'] for s in shifts if s['shift']]
+                shift_values = [s['shift'] for s in shifts if s and 'shift' in s]
 
             return {
                 "schema": schema_info,
@@ -109,9 +117,9 @@ def get_database_schema():
     except Exception as e:
         logger.error(f"Error fetching schema: {e}")
 
-    # Fallback schema
+    # Fallback schema with correct TEXT date info
     return {
-        "schema": "Table: roster(staff_id integer, staff_name text, date date, shift text)",
+        "schema": "Table: roster(staff_id TEXT, staff_name TEXT, date TEXT (stores dates as YYYY-MM-DD strings), shift TEXT)",
         "shift_codes": ["D", "OFF", "NP", "N", "A", "AP"],
         "shift_meanings": {
             "D": "Day shift",
@@ -136,52 +144,52 @@ You are a SQL expert. Convert natural language questions into PostgreSQL queries
 DATABASE SCHEMA:
 {DB_SCHEMA['schema']}
 
-CRITICAL DATA TYPE NOTES:
-- The 'date' column is of type DATE
-- The 'shift' column is of type TEXT
-- When comparing dates, use proper date casting
+CRITICAL DATA TYPE NOTES (VERY IMPORTANT):
+- The 'date' column is TEXT (stores dates as strings in 'YYYY-MM-DD' format)
+- The 'shift' column is TEXT
+- When comparing with dates, you MUST use string literals with single quotes
+- Example: date = '2024-03-25'
 
 SHIFT CODES AND MEANINGS:
 {json.dumps(DB_SCHEMA['shift_meanings'], indent=2)}
 
 VALID SHIFT CODES: {', '.join(DB_SCHEMA['shift_codes'])}
 
-IMPORTANT RULES:
-1. Return ONLY the SQL query, no explanations, no markdown, no semicolons
-2. Use single quotes for string values
-3. For date handling:
-   - CURRENT_DATE returns today's date (DATE type)
-   - For date arithmetic: CURRENT_DATE + INTERVAL '1 day'
-   - When comparing with date column, no casting needed
-   - When using string dates, cast to DATE: '2024-03-25'::DATE
-4. Always use staff_name in results (not staff_id)
-5. When filtering by shift, use the shift code (e.g., shift = 'OFF' for off duty)
-6. Sort results by date when showing multiple days
+DATE HANDLING RULES (CRITICAL):
+1. Since date is TEXT, you CANNOT use date arithmetic directly on the column
+2. For "today": use CURRENT_DATE::TEXT (converts today's date to text)
+3. For "tomorrow": use (CURRENT_DATE + 1)::TEXT
+4. For "yesterday": use (CURRENT_DATE - 1)::TEXT
+5. For date ranges: compare using BETWEEN with TEXT values (YYYY-MM-DD format works alphabetically)
+6. Always use YYYY-MM-DD format in single quotes
 
 EXAMPLES:
 
 Q: "Who is off tomorrow?"
-A: SELECT staff_name FROM roster WHERE shift = 'OFF' AND date = CURRENT_DATE + INTERVAL '1 day'
+A: SELECT staff_name FROM roster WHERE shift = 'OFF' AND date = (CURRENT_DATE + 1)::TEXT
 
 Q: "What is John's shift today?"
-A: SELECT shift FROM roster WHERE staff_name = 'John' AND date = CURRENT_DATE
+A: SELECT shift FROM roster WHERE staff_name = 'John' AND date = CURRENT_DATE::TEXT
 
 Q: "Who's working night shift this week?"
-A: SELECT staff_name, date FROM roster WHERE shift = 'N' AND date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days' ORDER BY date
+A: SELECT staff_name, date FROM roster WHERE shift = 'N' AND date BETWEEN CURRENT_DATE::TEXT AND (CURRENT_DATE + 7)::TEXT ORDER BY date
 
 Q: "Show me the roster for Monday"
-A: SELECT staff_name, shift FROM roster WHERE date = '2024-03-25'::DATE ORDER BY shift
+A: SELECT staff_name, shift FROM roster WHERE date = '2024-03-25' ORDER BY shift
 
 Q: "Is Sarah working on Friday?"
-A: SELECT shift FROM roster WHERE staff_name = 'Sarah' AND date = '2024-03-29'::DATE
+A: SELECT shift FROM roster WHERE staff_name = 'Sarah' AND date = '2024-03-29'
 
 Q: "Who is on afternoon shift today?"
-A: SELECT staff_name FROM roster WHERE shift = 'A' AND date = CURRENT_DATE
+A: SELECT staff_name FROM roster WHERE shift = 'A' AND date = CURRENT_DATE::TEXT
 
 Q: "What's everyone's schedule for next week?"
-A: SELECT staff_name, shift, date FROM roster WHERE date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days' ORDER BY date, shift
+A: SELECT staff_name, shift, date FROM roster WHERE date BETWEEN CURRENT_DATE::TEXT AND (CURRENT_DATE + 7)::TEXT ORDER BY date, shift
 
-Now convert this question to SQL:
+Q: "How many people are on leave today?"
+A: SELECT COUNT(*) as count FROM roster WHERE shift = 'OFF' AND date = CURRENT_DATE::TEXT
+
+Now convert this question to SQL. Return ONLY the SQL query, no explanations, no markdown, no semicolons:
 """
 
 # ================= NATURAL LANGUAGE RESPONSE PROMPT =================
@@ -208,8 +216,9 @@ Guidelines for response:
 
 Examples of good responses:
 - "Tomorrow, John and Sarah are off duty. They'll be back on Tuesday."
-- "Mike is working the night shift today from 10 PM to 6 AM."
+- "Mike is working the night shift today."
 - "Here's this week's night shift schedule: Monday: David, Tuesday: Emily..."
+- "I found 5 people working the afternoon shift today: Alex, Jamie, Taylor, Jordan, and Casey."
 
 Response:
 """
@@ -268,13 +277,10 @@ def clean_sql(sql_text):
     if sql_text.endswith(';'):
         sql_text = sql_text[:-1]
 
-    # Don't remove interior semicolons or break INTERVAL syntax
-    # Just ensure the SQL starts with SELECT
-    if not sql_text.upper().lstrip().startswith('SELECT'):
-        # Try to extract SELECT statement
-        select_match = re.search(r'(SELECT.*)', sql_text, re.IGNORECASE | re.DOTALL)
-        if select_match:
-            sql_text = select_match.group(1)
+    # Extract just the SELECT statement if there's extra text
+    select_match = re.search(r'(SELECT.*)', sql_text, re.IGNORECASE | re.DOTALL)
+    if select_match:
+        sql_text = select_match.group(1)
 
     return sql_text.strip()
 
@@ -400,18 +406,18 @@ async def chat_completions(request: ChatCompletionRequest):
         if not sql or not sql.upper().strip().startswith("SELECT"):
             logger.warning(f"Invalid SQL generated, using fallback")
 
-            # Fallback logic for common queries
+            # Fallback logic for common queries with TEXT date handling
             user_message_lower = user_message.lower()
 
             if "off" in user_message_lower and "tomorrow" in user_message_lower:
-                sql = "SELECT staff_name FROM roster WHERE shift = 'OFF' AND date = CURRENT_DATE + INTERVAL '1 day'"
+                sql = "SELECT staff_name FROM roster WHERE shift = 'OFF' AND date = (CURRENT_DATE + 1)::TEXT"
             elif "off" in user_message_lower and "today" in user_message_lower:
-                sql = "SELECT staff_name FROM roster WHERE shift = 'OFF' AND date = CURRENT_DATE"
+                sql = "SELECT staff_name FROM roster WHERE shift = 'OFF' AND date = CURRENT_DATE::TEXT"
             elif "off" in user_message_lower and "this week" in user_message_lower:
-                sql = "SELECT staff_name, date FROM roster WHERE shift = 'OFF' AND date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days' ORDER BY date"
+                sql = "SELECT staff_name, date FROM roster WHERE shift = 'OFF' AND date BETWEEN CURRENT_DATE::TEXT AND (CURRENT_DATE + 7)::TEXT ORDER BY date"
             elif "today" in user_message_lower:
                 if "who" in user_message_lower or "everyone" in user_message_lower:
-                    sql = "SELECT staff_name, shift FROM roster WHERE date = CURRENT_DATE ORDER BY shift"
+                    sql = "SELECT staff_name, shift FROM roster WHERE date = CURRENT_DATE::TEXT ORDER BY shift"
                 else:
                     # Try to extract name
                     words = user_message.split()
@@ -420,11 +426,11 @@ async def chat_completions(request: ChatCompletionRequest):
                                                                                         'why', 'how', 'today',
                                                                                         'tomorrow', 'yesterday', 'is',
                                                                                         'are', 'on', 'for']:
-                            sql = f"SELECT shift FROM roster WHERE staff_name = '{word}' AND date = CURRENT_DATE"
+                            sql = f"SELECT shift FROM roster WHERE staff_name = '{word}' AND date = CURRENT_DATE::TEXT"
                             break
             elif "tomorrow" in user_message_lower:
                 if "who" in user_message_lower or "everyone" in user_message_lower:
-                    sql = "SELECT staff_name, shift FROM roster WHERE date = CURRENT_DATE + INTERVAL '1 day' ORDER BY shift"
+                    sql = "SELECT staff_name, shift FROM roster WHERE date = (CURRENT_DATE + 1)::TEXT ORDER BY shift"
                 else:
                     # Try to extract name
                     words = user_message.split()
@@ -433,30 +439,26 @@ async def chat_completions(request: ChatCompletionRequest):
                                                                                         'why', 'how', 'today',
                                                                                         'tomorrow', 'yesterday', 'is',
                                                                                         'are', 'on', 'for']:
-                            sql = f"SELECT shift FROM roster WHERE staff_name = '{word}' AND date = CURRENT_DATE + INTERVAL '1 day'"
+                            sql = f"SELECT shift FROM roster WHERE staff_name = '{word}' AND date = (CURRENT_DATE + 1)::TEXT"
                             break
             elif "night" in user_message_lower:
                 if "this week" in user_message_lower:
-                    sql = "SELECT staff_name, date FROM roster WHERE shift = 'N' AND date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days' ORDER BY date"
+                    sql = "SELECT staff_name, date FROM roster WHERE shift = 'N' AND date BETWEEN CURRENT_DATE::TEXT AND (CURRENT_DATE + 7)::TEXT ORDER BY date"
                 else:
-                    sql = "SELECT staff_name FROM roster WHERE shift = 'N' AND date = CURRENT_DATE"
+                    sql = "SELECT staff_name FROM roster WHERE shift = 'N' AND date = CURRENT_DATE::TEXT"
             elif "afternoon" in user_message_lower:
                 if "this week" in user_message_lower:
-                    sql = "SELECT staff_name, date FROM roster WHERE shift = 'A' AND date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days' ORDER BY date"
+                    sql = "SELECT staff_name, date FROM roster WHERE shift = 'A' AND date BETWEEN CURRENT_DATE::TEXT AND (CURRENT_DATE + 7)::TEXT ORDER BY date"
                 else:
-                    sql = "SELECT staff_name FROM roster WHERE shift = 'A' AND date = CURRENT_DATE"
+                    sql = "SELECT staff_name FROM roster WHERE shift = 'A' AND date = CURRENT_DATE::TEXT"
             elif "day shift" in user_message_lower or "day" in user_message_lower:
                 if "this week" in user_message_lower:
-                    sql = "SELECT staff_name, date FROM roster WHERE shift = 'D' AND date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days' ORDER BY date"
+                    sql = "SELECT staff_name, date FROM roster WHERE shift = 'D' AND date BETWEEN CURRENT_DATE::TEXT AND (CURRENT_DATE + 7)::TEXT ORDER BY date"
                 else:
-                    sql = "SELECT staff_name FROM roster WHERE shift = 'D' AND date = CURRENT_DATE"
-            elif "monday" in user_message_lower or "tuesday" in user_message_lower or "wednesday" in user_message_lower or "thursday" in user_message_lower or "friday" in user_message_lower:
-                # Handle day names - this is more complex, would need actual date calculation
-                # For now, just use a generic query
-                sql = "SELECT staff_name, shift, date FROM roster WHERE date >= CURRENT_DATE ORDER BY date LIMIT 10"
+                    sql = "SELECT staff_name FROM roster WHERE shift = 'D' AND date = CURRENT_DATE::TEXT"
             else:
                 # Generic query
-                sql = "SELECT staff_name, shift, date FROM roster WHERE date >= CURRENT_DATE ORDER BY date LIMIT 10"
+                sql = "SELECT staff_name, shift, date FROM roster WHERE date >= CURRENT_DATE::TEXT ORDER BY date LIMIT 10"
 
         # Execute the SQL
         results = run_sql(sql)
@@ -519,54 +521,6 @@ async def chat_completions(request: ChatCompletionRequest):
             }]
         }
 
-
-@app.get("/debug/check-data")
-async def check_data_types():
-    """Check the actual data types in your database"""
-    try:
-        # Check column data types
-        type_query = """
-        SELECT 
-            column_name, 
-            data_type 
-        FROM information_schema.columns 
-        WHERE table_name = 'roster';
-        """
-
-        headers = {
-            "apikey": SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
-            "Content-Type": "application/json"
-        }
-
-        response = requests.post(
-            f"{SUPABASE_URL}/rest/v1/rpc/run_sql",
-            headers=headers,
-            json={"query": type_query},
-            timeout=10
-        )
-
-        columns = response.json() if response.status_code == 200 else []
-
-        # Get a sample row
-        sample_query = "SELECT * FROM roster LIMIT 3;"
-        sample_response = requests.post(
-            f"{SUPABASE_URL}/rest/v1/rpc/run_sql",
-            headers=headers,
-            json={"query": sample_query},
-            timeout=10
-        )
-
-        samples = sample_response.json() if sample_response.status_code == 200 else []
-
-        return {
-            "columns": columns,
-            "sample_data": samples,
-            "date_column_type": next((c['data_type'] for c in columns if c['column_name'] == 'date'), 'unknown'),
-            "shift_column_type": next((c['data_type'] for c in columns if c['column_name'] == 'shift'), 'unknown')
-        }
-    except Exception as e:
-        return {"error": str(e)}
 
 # if __name__ == "__main__":
 #     import uvicorn
