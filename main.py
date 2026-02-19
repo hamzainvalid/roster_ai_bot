@@ -265,6 +265,36 @@ async def health_check():
         "shift_codes": DB_SCHEMA['shift_codes']
     }
 
+@app.get("/v1/models")
+@app.get("/models")
+async def list_models():
+    """Return available models in OpenAI compatible format that OpenWebUI expects"""
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "roster-assistant",
+                "name": "Roster Assistant",
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "organization",
+                "permission": [],
+                "root": "roster-assistant",
+                "parent": None,
+                "description": "Roster chatbot that answers questions about staff schedules"
+            },
+            {
+                "id": "gpt-3.5-turbo",  # OpenWebUI often looks for this
+                "name": "Roster Assistant",
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "organization",
+                "permission": [],
+                "root": "roster-assistant",
+                "parent": None
+            }
+        ]
+    }
 
 # ================= CHAT ENDPOINT =================
 
