@@ -3,8 +3,7 @@ pydantic
 uvicorn
 requests
 langchain-community
-langchain
+langchain==0.1.0
 langchain-openai
-langchain-chains
 openai
 SQLAlchemy

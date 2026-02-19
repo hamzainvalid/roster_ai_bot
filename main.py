@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import requests
 from langchain_community.utilities import SQLDatabase
-from langchain.chains import create_sql_query_chain
+from langchain.chains.sql_database.query import create_sql_query_chain
 from langchain_openai import OpenAI
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
