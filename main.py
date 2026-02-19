@@ -6,7 +6,7 @@ from langchain_openai import OpenAI
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+GEMINI_API_KEY = os.environ["GEM_API"]
 
 llm = OpenAI(
     model="gemini-pro",
