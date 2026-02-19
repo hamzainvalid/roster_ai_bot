@@ -1,39 +1,54 @@
 import os
-import requests
-from fastapi import FastAPI
-from pydantic import BaseModel
-from typing import List, Optional
-from openai import OpenAI
 import time
+import requests
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List, Optional, Dict, Any
+from openai import OpenAI
+import logging
 
+# ================= LOGGING CONFIG =================
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ================= ENV VARIABLES =================
 
-SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
-DEEPSEEK_API_KEY = os.environ["DEEPSEEK_API"]  # Your OpenRouter or DeepSeek API key
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 
 # ================= DEEPSEEK CONFIG =================
 
-# Using OpenRouter's free DeepSeek endpoint (recommended)
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=DEEPSEEK_API_KEY,
-)
+try:
+    client = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=DEEPSEEK_API_KEY,
+        default_headers={
+            "HTTP-Referer": "https://roster-ai-bot.onrender.com",
+            "X-Title": "Roster Chatbot",
+        }
+    )
+    logger.info("DeepSeek client initialized successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize DeepSeek client: {e}")
+    client = None
 
-# Alternative: Direct DeepSeek API (requires top-up but has free quota)
-# client = OpenAI(
-#     base_url="https://api.deepseek.com/v1",
-#     api_key=DEEPSEEK_API_KEY,
-# )
-
-# Model to use (free on OpenRouter)
-MODEL_NAME = "deepseek/deepseek-r1:free"  # Free tier on OpenRouter
-# Alternative: "deepseek/deepseek-chat" for paid version
+MODEL_NAME = "deepseek/deepseek-r1:free"
 
 # ================= FASTAPI INIT =================
 
 app = FastAPI()
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # OpenWebUI might be on different port
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ================= SYSTEM PROMPT =================
 
@@ -66,27 +81,6 @@ RULES:
 - Keep responses concise but friendly
 - Never make up or invent data
 
-EXAMPLES OF GOOD RESPONSES:
-User: "Who is off tomorrow?"
-SQL: SELECT staff_name FROM roster WHERE shift = 'OFF' AND date = CURRENT_DATE + 1
-Response: "Tomorrow, the following staff members are off duty: [names]. They'll be enjoying their day off!"
-
-User: "What's John's shift today?"
-SQL: SELECT shift FROM roster WHERE staff_name = 'John' AND date = CURRENT_DATE
-Response: "John is working the [Day/Afternoon/Night] shift today." or "John is off duty today."
-
-User: "Who's working night shift this week?"
-SQL: SELECT staff_name FROM roster WHERE shift = 'N' AND date BETWEEN CURRENT_DATE AND CURRENT_DATE + 7
-Response: "This week's night shift staff are: [names]. They'll be working through the night."
-
-User: "Show me the roster for Monday"
-SQL: SELECT staff_name, shift FROM roster WHERE date = '2024-01-15' ORDER BY shift
-Response: "Here's the roster for Monday, January 15th:
-- Day shift: [names]
-- Afternoon shift: [names]
-- Night shift: [names]
-- Off duty: [names]"
-
 Remember: You're not just generating SQL - you're having a conversation about staff schedules. Be helpful, friendly, and always respond in plain English with the actual data from the database.
 """
 
@@ -94,61 +88,136 @@ Remember: You're not just generating SQL - you're having a conversation about st
 # ================= SUPABASE EXEC =================
 
 def run_sql(sql: str):
-    response = requests.post(
-        f"{SUPABASE_URL}/rest/v1/rpc/run_sql",
-        headers={
+    """Execute SQL query on Supabase"""
+    try:
+        headers = {
             "apikey": SUPABASE_KEY,
             "Authorization": f"Bearer {SUPABASE_KEY}",
             "Content-Type": "application/json"
-        },
-        json={"query": sql}
-    )
+        }
 
-    if response.status_code != 200:
-        return {"error": response.text}
+        response = requests.post(
+            f"{SUPABASE_URL}/rest/v1/rpc/run_sql",
+            headers=headers,
+            json={"query": sql},
+            timeout=30
+        )
 
-    return response.json()
+        if response.status_code != 200:
+            logger.error(f"Supabase error: {response.status_code} - {response.text}")
+            return {"error": f"Database error: {response.text}"}
+
+        return response.json()
+    except Exception as e:
+        logger.error(f"Exception in run_sql: {e}")
+        return {"error": str(e)}
 
 
-# ================= OPENAI COMPATIBLE FORMAT =================
+# ================= PYDANTIC MODELS (OpenAI Compatible) =================
 
 class Message(BaseModel):
     role: str
     content: str
 
 
-class ChatRequest(BaseModel):
+class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[Message]
-    temperature: Optional[float] = 0.0
+    temperature: Optional[float] = 0.7
+    top_p: Optional[float] = 1.0
+    n: Optional[int] = 1
+    max_tokens: Optional[int] = None
+    stream: Optional[bool] = False
+    stop: Optional[List[str]] = None
 
 
-# ================= MODEL LIST =================
+# ================= HEALTH CHECK =================
+
+@app.get("/")
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for Render"""
+    return {
+        "status": "healthy",
+        "supabase_configured": bool(SUPABASE_URL and SUPABASE_KEY),
+        "deepseek_configured": bool(DEEPSEEK_API_KEY and client),
+    }
+
+
+# ================= OPENAI COMPATIBLE ENDPOINTS =================
 
 @app.get("/v1/models")
 @app.get("/models")
-def list_models():
+async def list_models():
+    """Return available models (OpenAI compatible format)"""
     return {
         "object": "list",
         "data": [
             {
                 "id": "roster-assistant",
                 "object": "model",
-                "owned_by": "organization"
+                "created": int(time.time()),
+                "owned_by": "organization",
+                "permission": [],
+                "root": "roster-assistant",
+                "parent": None
+            },
+            {
+                "id": MODEL_NAME,
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "deepseek",
+                "permission": [],
+                "root": MODEL_NAME,
+                "parent": None
             }
         ]
     }
 
 
-# ================= CHAT ENDPOINT =================
-
 @app.post("/v1/chat/completions")
 @app.post("/chat/completions")
-async def chat(req: ChatRequest):
+async def chat_completions(request: ChatCompletionRequest):
+    """Main chat endpoint (OpenAI compatible format)"""
     try:
-        user_message = req.messages[-1].content
+        logger.info(f"Received request with {len(request.messages)} messages")
 
-        # Step 1: Generate SQL from user question
+        if not client:
+            return {
+                "id": f"chatcmpl-{int(time.time())}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": request.model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "I'm sorry, but the AI service is not properly configured. Please check the server logs."
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0
+                }
+            }
+
+        # Get the last user message
+        user_message = None
+        for msg in reversed(request.messages):
+            if msg.role == "user":
+                user_message = msg.content
+                break
+
+        if not user_message:
+            user_message = "Hello"
+
+        logger.info(f"User message: {user_message}")
+
+        # Step 1: Generate SQL
         sql_prompt = f"""{SYSTEM_PROMPT}
 
 Based on the user's question below, generate ONLY a SQL query (SELECT statement) that would fetch the required data from the roster table. 
@@ -158,7 +227,6 @@ User question: {user_message}
 
 SQL query:"""
 
-        # Call DeepSeek for SQL generation
         sql_response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
@@ -166,51 +234,40 @@ SQL query:"""
                  "content": "You are a SQL expert. Generate precise SQL queries based on user questions."},
                 {"role": "user", "content": sql_prompt}
             ],
-            temperature=0.1,  # Low temperature for consistent SQL generation
+            temperature=0.1,
             max_tokens=500
         )
 
-        if not sql_response.choices or not sql_response.choices[0].message.content:
-            return {"error": "DeepSeek returned empty response."}
-
         sql = sql_response.choices[0].message.content.strip()
 
-        # Clean up SQL if it contains markdown or extra text
+        # Clean SQL
         if "```sql" in sql:
             sql = sql.split("```sql")[1].split("```")[0].strip()
         elif "```" in sql:
             sql = sql.split("```")[1].split("```")[0].strip()
 
-        # Basic sanitization
-        sql_lower = sql.lower()
+        logger.info(f"Generated SQL: {sql}")
 
+        # Validate and execute SQL
+        sql_lower = sql.lower()
         if not sql_lower.startswith("select"):
             answer = "I can only look up information, not make changes to the database."
-        elif any(word in sql_lower for word in ["insert", "update", "delete", "drop", "alter", "create", "truncate"]):
+        elif any(word in sql_lower for word in ["insert", "update", "delete", "drop", "alter"]):
             answer = "I'm sorry, I can only read information from the database, not modify it."
         else:
-            # Execute SQL
             result = run_sql(sql)
+            logger.info(f"SQL result: {str(result)[:200]}...")
 
-            # Step 2: Convert results to natural language
             if result and isinstance(result, list) and len(result) > 0:
-                # Create a prompt to convert the results to natural language
                 conversion_prompt = f"""
                 User question: "{user_message}"
 
                 Database results: {result}
 
-                SQL query used: {sql}
-
-                Provide a friendly, natural language response that answers the user's question based on these database results.
-
-                Guidelines:
-                - Use the shift code meanings: D=Day shift, OFF=Off duty, N=Night shift, A=Afternoon shift, NP=Night Phone, AP=Afternoon Phone
-                - If results show multiple people, list them in a friendly way
-                - Format dates in a readable format (e.g., "Monday, January 15th")
-                - Be conversational but informative
-                - If the results show shift times, mention them naturally
-                - Keep it concise but complete
+                Provide a friendly, natural language response that answers the user's question.
+                Use the shift code meanings: D=Day shift, OFF=Off duty, N=Night shift, A=Afternoon shift, NP=Night Phone, AP=Afternoon Phone.
+                If the results show multiple people, list them in a friendly way.
+                Be conversational but informative.
 
                 Response:"""
 
@@ -221,20 +278,20 @@ SQL query:"""
                          "content": "You are a friendly HR assistant who explains roster data conversationally."},
                         {"role": "user", "content": conversion_prompt}
                     ],
-                    temperature=0.3,  # Slightly higher for natural conversation
+                    temperature=0.3,
                     max_tokens=500
                 )
 
-                answer = natural_response.choices[0].message.content if natural_response.choices else str(result)
+                answer = natural_response.choices[0].message.content
             else:
-                answer = f"I couldn't find any information matching your question about '{user_message}'. Would you like to ask about something else? For example, you could ask 'Who's working today?' or 'What's Sarah's shift tomorrow?'"
+                answer = f"I couldn't find any information matching your question about '{user_message}'. Would you like to ask about something else?"
 
-        # OpenAI compatible response
+        # Return OpenAI compatible response
         return {
-            "id": "chatcmpl-roster-bot",
+            "id": f"chatcmpl-{int(time.time())}",
             "object": "chat.completion",
             "created": int(time.time()),
-            "model": MODEL_NAME,
+            "model": request.model,
             "choices": [
                 {
                     "index": 0,
@@ -246,22 +303,39 @@ SQL query:"""
                 }
             ],
             "usage": {
-                "prompt_tokens": sql_response.usage.prompt_tokens if hasattr(sql_response, 'usage') else 0,
-                "completion_tokens": sql_response.usage.completion_tokens if hasattr(sql_response, 'usage') else 0,
-                "total_tokens": sql_response.usage.total_tokens if hasattr(sql_response, 'usage') else 0
+                "prompt_tokens": 100,  # Approximate
+                "completion_tokens": 50,  # Approximate
+                "total_tokens": 150
             }
         }
 
     except Exception as e:
+        logger.error(f"Error in chat endpoint: {e}", exc_info=True)
         return {
-            "error": str(e),
-            "message": "I encountered an error processing your request. Please try again."
+            "id": f"chatcmpl-{int(time.time())}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": request.model if request else "unknown",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": f"I encountered an error: {str(e)}"
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0
+            }
         }
 
 
-# ================= RENDER PORT SUPPORT =================
-#
 # if __name__ == "__main__":
 #     import uvicorn
-#     port = int(os.environ.get("PORT", 8000))
+#
+#     port = int(os.environ.get("PORT", 10000))
 #     uvicorn.run(app, host="0.0.0.0", port=port)
