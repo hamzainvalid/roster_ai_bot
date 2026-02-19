@@ -78,32 +78,34 @@ def list_models():
 
 @app.post("/v1/chat/completions")
 async def chat(req: ChatRequest):
+    try:
+        user_message = req.messages[-1].content
 
-    # Get latest user message
-    user_message = req.messages[-1].content
+        prompt = SYSTEM_PROMPT + "\nQuestion: " + user_message
+        sql = llm(prompt).strip()
 
-    # Generate SQL
-    prompt = SYSTEM_PROMPT + "\nQuestion: " + user_message
-    sql = llm(prompt).strip()
+        if not sql.lower().startswith("select"):
+            answer = "Only SELECT queries are allowed."
+        else:
+            result = run_sql(sql)
+            answer = f"{result}"
 
-    # Safety check
-    if not sql.lower().startswith("select"):
-        answer = "Only SELECT queries are allowed."
-    else:
-        result = run_sql(sql)
-        answer = f"SQL:\n{sql}\n\nResult:\n{result}"
+        return {
+            "id": "chatcmpl-text2sql",
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": str(answer)
+                    },
+                    "finish_reason": "stop"
+                }
+            ]
+        }
 
-    return {
-        "id": "chatcmpl-text2sql",
-        "object": "chat.completion",
-        "choices": [
-            {
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": answer
-                },
-                "finish_reason": "stop"
-            }
-        ]
-    }
+    except Exception as e:
+        return {
+            "error": str(e)
+        }
