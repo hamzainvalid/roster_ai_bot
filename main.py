@@ -10,7 +10,7 @@ SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 GEMINI_API_KEY = os.environ["GEM_API"]
 
 llm = OpenAI(
-    model="gemini-pro",
+    model="gemini-2.5-flash",
     openai_api_key=GEMINI_API_KEY,
     openai_api_base="https://generativelanguage.googleapis.com/v1beta"
 )
