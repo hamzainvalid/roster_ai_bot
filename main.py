@@ -23,24 +23,56 @@ app = FastAPI()
 # ================= SYSTEM PROMPT =================
 
 SYSTEM_PROMPT = """
-You are a SQL assistant.
+You are a friendly and helpful HR assistant specializing in staff rosters. Your role is to answer questions about staff schedules in a natural, conversational way.
 
-Only answer using database results.
-
+DATABASE SCHEMA:
 Table: roster(staff_id, staff_name, date, shift)
 
-Shift codes:
-D = Day
-OFF = Off duty
-NP = Night Phone
-N = Night
-A = Afternoon
-AP = Afternoon Phone
+SHIFT CODES:
+- D = Day shift
+- OFF = Off duty / Day off
+- NP = Night Phone (on-call)
+- N = Night shift
+- A = Afternoon shift
+- AP = Afternoon Phone (on-call)
 
-For codes you don't know just return codes
+YOUR TASK:
+1. First, understand what the user is asking about the roster
+2. Generate a SQL query to fetch the exact data needed
+3. After getting the SQL results, convert them into a natural, friendly response
 
-Never invent data.
-Always query first.
+RULES:
+- Always convert the raw data into conversational English
+- Use staff names not IDs in your responses
+- For date queries, understand relative terms like "today", "tomorrow", "this week"
+- When someone is off duty, say they're "off" or "on leave" not "OFF"
+- Expand shift codes to their full meanings
+- If no data is found, politely say so and suggest alternatives
+- Keep responses concise but friendly
+- Never make up or invent data
+
+EXAMPLES OF GOOD RESPONSES:
+User: "Who is off tomorrow?"
+SQL: SELECT staff_name FROM roster WHERE shift = 'OFF' AND date = CURRENT_DATE + 1
+Response: "Tomorrow, the following staff members are off duty: [names]. They'll be enjoying their day off!"
+
+User: "What's John's shift today?"
+SQL: SELECT shift FROM roster WHERE staff_name = 'John' AND date = CURRENT_DATE
+Response: "John is working the [Day/Afternoon/Night] shift today." or "John is off duty today."
+
+User: "Who's working night shift this week?"
+SQL: SELECT staff_name FROM roster WHERE shift = 'N' AND date BETWEEN CURRENT_DATE AND CURRENT_DATE + 7
+Response: "This week's night shift staff are: [names]. They'll be working through the night."
+
+User: "Show me the roster for Monday"
+SQL: SELECT staff_name, shift FROM roster WHERE date = '2024-01-15' ORDER BY shift
+Response: "Here's the roster for Monday, January 15th:
+- Day shift: [names]
+- Afternoon shift: [names]
+- Night shift: [names]
+- Off duty: [names]"
+
+Remember: You're not just generating SQL - you're having a conversation about staff schedules. Be helpful, friendly, and always respond in plain English with the actual data from the database.
 """
 
 # ================= SUPABASE EXEC =================
@@ -96,11 +128,10 @@ async def chat(req: ChatRequest):
     try:
         user_message = req.messages[-1].content
 
-        # Build Gemini prompt
-        prompt = SYSTEM_PROMPT + "\n\nQuestion: " + user_message
+        # Step 1: Generate SQL from user question
+        sql_prompt = SYSTEM_PROMPT + "\n\nGenerate ONLY a SQL query for this question: " + user_message
 
-        # Call Gemini
-        response = model.generate_content(prompt)
+        response = model.generate_content(sql_prompt)
 
         if not response.text:
             return {"error": "Gemini returned empty response."}
@@ -111,12 +142,31 @@ async def chat(req: ChatRequest):
         sql_lower = sql.lower()
 
         if not sql_lower.startswith("select"):
-            answer = "Only SELECT queries are allowed."
+            answer = "I can only look up information, not make changes to the database."
         elif any(word in sql_lower for word in ["insert", "update", "delete", "drop", "alter"]):
-            answer = "Dangerous query detected. Only SELECT allowed."
+            answer = "I'm sorry, I can only read information from the database, not modify it."
         else:
+            # Execute SQL
             result = run_sql(sql)
-            answer = str(result)
+
+            # Step 2: Convert results to natural language
+            if result and isinstance(result, list) and len(result) > 0:
+                # Create a prompt to convert the results to natural language
+                conversion_prompt = f"""
+                Based on this user question: "{user_message}"
+
+                And these database results: {result}
+
+                Provide a friendly, natural language response that answers the user's question.
+                Use the shift code meanings: D=Day, OFF=Off duty, N=Night, A=Afternoon, NP=Night Phone, AP=Afternoon Phone.
+                If the results show multiple people, list them nicely.
+                Keep it conversational but informative.
+                """
+
+                natural_response = model.generate_content(conversion_prompt)
+                answer = natural_response.text if natural_response.text else str(result)
+            else:
+                answer = f"I couldn't find any information matching your question about '{user_message}'. Would you like to ask about something else?"
 
         # OpenAI compatible response
         return {
