@@ -1,13 +1,14 @@
 import os
 import time
 import requests
-from fastapi import FastAPI, HTTPException
+import re
+import json
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 from openai import OpenAI
 import logging
-import json
 
 # ================= LOGGING CONFIG =================
 
@@ -26,12 +27,12 @@ client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=DEEPSEEK_API_KEY,
     default_headers={
-        "HTTP-Referer": "https://roster-ai-bot.onrender.com",
+        "HTTP-Referer": "https://roster-ai-bot.onrender.com",  # Replace with your actual Render URL
         "X-Title": "Roster Chatbot",
     }
 )
 
-MODEL_NAME = "openrouter/free"  # Using the working free model
+MODEL_NAME = "openrouter/free"  # Working free model
 
 # ================= FASTAPI INIT =================
 
@@ -48,11 +49,9 @@ app.add_middleware(
 
 # ================= DATABASE SCHEMA INFO =================
 
-# First, let's fetch the actual schema from your database
 def get_database_schema():
     """Get the actual schema from your roster table"""
     try:
-        # Query to get column information
         schema_query = """
         SELECT 
             column_name, 
@@ -81,7 +80,7 @@ def get_database_schema():
             schema_info += ", ".join([f"{col['column_name']} {col['data_type']}" for col in columns])
             schema_info += ")"
 
-            # Also get sample data to understand shift codes
+            # Get distinct shift codes
             sample_query = "SELECT DISTINCT shift FROM roster LIMIT 10;"
             sample_response = requests.post(
                 f"{SUPABASE_URL}/rest/v1/rpc/run_sql",
@@ -90,36 +89,37 @@ def get_database_schema():
                 timeout=10
             )
 
+            shift_values = []
             if sample_response.status_code == 200:
                 shifts = sample_response.json()
                 shift_values = [s['shift'] for s in shifts if s['shift']]
 
-                return {
-                    "schema": schema_info,
-                    "shift_codes": shift_values,
-                    "shift_meanings": {
-                        "D": "Day shift",
-                        "OFF": "Off duty",
-                        "NP": "Night Phone",
-                        "N": "Night shift",
-                        "A": "Afternoon shift",
-                        "AP": "Afternoon Phone"
-                    }
+            return {
+                "schema": schema_info,
+                "shift_codes": shift_values if shift_values else ["D", "OFF", "NP", "N", "A", "AP"],
+                "shift_meanings": {
+                    "D": "Day shift",
+                    "OFF": "Off duty",
+                    "NP": "Night Phone (on-call)",
+                    "N": "Night shift",
+                    "A": "Afternoon shift",
+                    "AP": "Afternoon Phone (on-call)"
                 }
+            }
     except Exception as e:
         logger.error(f"Error fetching schema: {e}")
 
-    # Fallback to default schema if can't fetch
+    # Fallback schema
     return {
         "schema": "Table: roster(staff_id integer, staff_name text, date date, shift text)",
         "shift_codes": ["D", "OFF", "NP", "N", "A", "AP"],
         "shift_meanings": {
             "D": "Day shift",
             "OFF": "Off duty",
-            "NP": "Night Phone",
+            "NP": "Night Phone (on-call)",
             "N": "Night shift",
             "A": "Afternoon shift",
-            "AP": "Afternoon Phone"
+            "AP": "Afternoon Phone (on-call)"
         }
     }
 
@@ -142,7 +142,7 @@ SHIFT CODES AND MEANINGS:
 VALID SHIFT CODES: {', '.join(DB_SCHEMA['shift_codes'])}
 
 IMPORTANT RULES:
-1. Return ONLY the SQL query, no explanations, no markdown
+1. Return ONLY the SQL query, no explanations, no markdown, no semicolons
 2. Use single quotes for string values
 3. For dates:
    - "today" = CURRENT_DATE
@@ -157,25 +157,25 @@ IMPORTANT RULES:
 EXAMPLES:
 
 Q: "Who is off tomorrow?"
-A: SELECT staff_name FROM roster WHERE shift = 'OFF' AND date = CURRENT_DATE + 1;
+A: SELECT staff_name FROM roster WHERE shift = 'OFF' AND date = CURRENT_DATE + 1
 
 Q: "What is John's shift today?"
-A: SELECT shift FROM roster WHERE staff_name = 'John' AND date = CURRENT_DATE;
+A: SELECT shift FROM roster WHERE staff_name = 'John' AND date = CURRENT_DATE
 
 Q: "Who's working night shift this week?"
-A: SELECT staff_name, date FROM roster WHERE shift = 'N' AND date BETWEEN CURRENT_DATE AND CURRENT_DATE + 7 ORDER BY date;
+A: SELECT staff_name, date FROM roster WHERE shift = 'N' AND date BETWEEN CURRENT_DATE AND CURRENT_DATE + 7 ORDER BY date
 
 Q: "Show me the roster for Monday"
-A: SELECT staff_name, shift FROM roster WHERE date = '2024-03-25' ORDER BY shift;
+A: SELECT staff_name, shift FROM roster WHERE date = '2024-03-25' ORDER BY shift
 
 Q: "Is Sarah working on Friday?"
-A: SELECT shift FROM roster WHERE staff_name = 'Sarah' AND date = '2024-03-29';
+A: SELECT shift FROM roster WHERE staff_name = 'Sarah' AND date = '2024-03-29'
 
 Q: "Who is on afternoon shift today?"
-A: SELECT staff_name FROM roster WHERE shift = 'A' AND date = CURRENT_DATE;
+A: SELECT staff_name FROM roster WHERE shift = 'A' AND date = CURRENT_DATE
 
 Q: "What's everyone's schedule for next week?"
-A: SELECT staff_name, shift, date FROM roster WHERE date BETWEEN CURRENT_DATE AND CURRENT_DATE + 7 ORDER BY date, shift;
+A: SELECT staff_name, shift, date FROM roster WHERE date BETWEEN CURRENT_DATE AND CURRENT_DATE + 7 ORDER BY date, shift
 
 Now convert this question to SQL:
 """
@@ -222,12 +222,15 @@ def run_sql(sql: str):
             "Content-Type": "application/json"
         }
 
-        logger.info(f"Executing SQL: {sql}")
+        # Remove any trailing semicolons
+        clean_sql = sql.rstrip(';')
+
+        logger.info(f"Executing SQL: {clean_sql}")
 
         response = requests.post(
             f"{SUPABASE_URL}/rest/v1/rpc/run_sql",
             headers=headers,
-            json={"query": sql},
+            json={"query": clean_sql},
             timeout=30
         )
 
@@ -239,6 +242,36 @@ def run_sql(sql: str):
     except Exception as e:
         logger.error(f"Exception in run_sql: {e}")
         return {"error": str(e)}
+
+
+# ================= SQL CLEANING FUNCTION =================
+
+def clean_sql(sql_text):
+    """Clean and validate SQL query"""
+    if not sql_text:
+        return ""
+
+    # Remove markdown code blocks
+    if "```sql" in sql_text:
+        sql_text = sql_text.split("```sql")[1].split("```")[0]
+    elif "```" in sql_text:
+        sql_text = sql_text.split("```")[1].split("```")[0]
+
+    # Remove any leading/trailing whitespace
+    sql_text = sql_text.strip()
+
+    # Remove trailing semicolons
+    sql_text = re.sub(r';+$', '', sql_text)
+
+    # Extract just the SELECT statement if there's extra text
+    select_match = re.search(r'(SELECT.*?)(?:$|;|\n\n)', sql_text, re.IGNORECASE | re.DOTALL)
+    if select_match:
+        sql_text = select_match.group(1).strip()
+
+    # Remove any remaining semicolons
+    sql_text = sql_text.rstrip(';')
+
+    return sql_text
 
 
 # ================= PYDANTIC MODELS =================
@@ -262,39 +295,70 @@ async def health_check():
     return {
         "status": "healthy",
         "database_schema": DB_SCHEMA['schema'],
-        "shift_codes": DB_SCHEMA['shift_codes']
+        "shift_codes": DB_SCHEMA['shift_codes'],
+        "deepseek_configured": bool(DEEPSEEK_API_KEY)
     }
+
+
+# ================= MODEL LISTING ENDPOINTS =================
 
 @app.get("/v1/models")
 @app.get("/models")
 async def list_models():
-    """Return available models in OpenAI compatible format that OpenWebUI expects"""
+    """OpenAI compatible model listing"""
+    current_time = int(time.time())
+
     return {
         "object": "list",
         "data": [
             {
                 "id": "roster-assistant",
-                "name": "Roster Assistant",
                 "object": "model",
-                "created": int(time.time()),
+                "created": current_time,
                 "owned_by": "organization",
-                "permission": [],
-                "root": "roster-assistant",
-                "parent": None,
-                "description": "Roster chatbot that answers questions about staff schedules"
-            },
-            {
-                "id": "gpt-3.5-turbo",  # OpenWebUI often looks for this
-                "name": "Roster Assistant",
-                "object": "model",
-                "created": int(time.time()),
-                "owned_by": "organization",
-                "permission": [],
+                "permission": [{
+                    "id": "modelperm-roster",
+                    "object": "model_permission",
+                    "created": current_time,
+                    "allow_create_engine": False,
+                    "allow_sampling": True,
+                    "allow_logprobs": False,
+                    "allow_search_indices": False,
+                    "allow_view": True,
+                    "allow_fine_tuning": False,
+                    "organization": "*",
+                    "group": None,
+                    "is_blocking": False
+                }],
                 "root": "roster-assistant",
                 "parent": None
             }
         ]
     }
+
+
+@app.get("/api/tags")
+async def list_ollama_models():
+    """Ollama-compatible model listing for OpenWebUI"""
+    return {
+        "models": [
+            {
+                "name": "roster-assistant:latest",
+                "model": "roster-assistant",
+                "modified_at": "2024-01-01T00:00:00Z",
+                "size": 1000000000,
+                "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                "details": {
+                    "format": "gguf",
+                    "family": "llama",
+                    "families": ["llama"],
+                    "parameter_size": "7B",
+                    "quantization_level": "Q4_0"
+                }
+            }
+        ]
+    }
+
 
 # ================= CHAT ENDPOINT =================
 
@@ -312,40 +376,69 @@ async def chat_completions(request: ChatCompletionRequest):
         sql_response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
-                {"role": "system", "content": "You are a SQL expert. Generate only SQL queries."},
+                {"role": "system",
+                 "content": "You are a SQL expert. Generate only SQL queries without explanations or semicolons."},
                 {"role": "user", "content": sql_prompt}
             ],
             temperature=0.1,
             max_tokens=300
         )
 
-        sql = sql_response.choices[0].message.content.strip()
+        raw_sql = sql_response.choices[0].message.content.strip()
+        logger.info(f"Raw SQL from AI: {raw_sql}")
 
-        # Clean SQL (remove markdown if present)
-        if "```sql" in sql:
-            sql = sql.split("```sql")[1].split("```")[0].strip()
-        elif "```" in sql:
-            sql = sql.split("```")[1].split("```")[0].strip()
+        # Clean the SQL
+        sql = clean_sql(raw_sql)
+        logger.info(f"Cleaned SQL: {sql}")
 
-        logger.info(f"Generated SQL: {sql}")
+        # STEP 2: EXECUTE SQL or use fallback
+        if not sql or not sql.upper().strip().startswith("SELECT"):
+            logger.warning(f"Invalid SQL generated, using fallback")
 
-        # STEP 2: EXECUTE SQL
-        if not sql.lower().startswith("select"):
-            # If SQL generation failed, try a simpler approach
-            if "off" in user_message.lower() and "tomorrow" in user_message.lower():
-                sql = "SELECT staff_name FROM roster WHERE shift = 'OFF' AND date = CURRENT_DATE + 1;"
-            elif "today" in user_message.lower():
-                if "who" in user_message.lower():
-                    sql = "SELECT staff_name, shift FROM roster WHERE date = CURRENT_DATE ORDER BY shift;"
+            # Fallback logic for common queries
+            user_message_lower = user_message.lower()
+
+            if "off" in user_message_lower and "tomorrow" in user_message_lower:
+                sql = "SELECT staff_name FROM roster WHERE shift = 'OFF' AND date = CURRENT_DATE + 1"
+            elif "off" in user_message_lower and "today" in user_message_lower:
+                sql = "SELECT staff_name FROM roster WHERE shift = 'OFF' AND date = CURRENT_DATE"
+            elif "off" in user_message_lower and "this week" in user_message_lower:
+                sql = "SELECT staff_name, date FROM roster WHERE shift = 'OFF' AND date BETWEEN CURRENT_DATE AND CURRENT_DATE + 7 ORDER BY date"
+            elif "today" in user_message_lower:
+                if "who" in user_message_lower:
+                    sql = "SELECT staff_name, shift FROM roster WHERE date = CURRENT_DATE ORDER BY shift"
                 else:
-                    # Extract name if present
+                    # Try to extract name
                     words = user_message.split()
                     for word in words:
-                        if word[0].isupper() and len(word) > 1:
-                            sql = f"SELECT shift FROM roster WHERE staff_name = '{word}' AND date = CURRENT_DATE;"
+                        if word[0].isupper() and len(word) > 1 and word.lower() not in ['who', 'what', 'when', 'where',
+                                                                                        'why', 'how', 'today',
+                                                                                        'tomorrow', 'yesterday']:
+                            sql = f"SELECT shift FROM roster WHERE staff_name = '{word}' AND date = CURRENT_DATE"
                             break
+            elif "tomorrow" in user_message_lower:
+                if "who" in user_message_lower:
+                    sql = "SELECT staff_name, shift FROM roster WHERE date = CURRENT_DATE + 1 ORDER BY shift"
+                else:
+                    # Try to extract name
+                    words = user_message.split()
+                    for word in words:
+                        if word[0].isupper() and len(word) > 1 and word.lower() not in ['who', 'what', 'when', 'where',
+                                                                                        'why', 'how', 'today',
+                                                                                        'tomorrow', 'yesterday']:
+                            sql = f"SELECT shift FROM roster WHERE staff_name = '{word}' AND date = CURRENT_DATE + 1"
+                            break
+            elif "night" in user_message_lower:
+                if "this week" in user_message_lower:
+                    sql = "SELECT staff_name, date FROM roster WHERE shift = 'N' AND date BETWEEN CURRENT_DATE AND CURRENT_DATE + 7 ORDER BY date"
+                else:
+                    sql = "SELECT staff_name FROM roster WHERE shift = 'N' AND date = CURRENT_DATE"
+            elif "afternoon" in user_message_lower:
+                sql = "SELECT staff_name FROM roster WHERE shift = 'A' AND date = CURRENT_DATE"
+            elif "day shift" in user_message_lower:
+                sql = "SELECT staff_name FROM roster WHERE shift = 'D' AND date = CURRENT_DATE"
             else:
-                answer = "I couldn't understand your query. Please try rephrasing."
+                answer = "I couldn't understand your query. Please try asking like: 'Who is off tomorrow?' or 'What's John's shift today?'"
                 return {
                     "choices": [{"message": {"role": "assistant", "content": answer}}]
                 }
@@ -356,8 +449,10 @@ async def chat_completions(request: ChatCompletionRequest):
 
         # STEP 3: CONVERT RESULTS TO NATURAL LANGUAGE
         if results and not isinstance(results, dict) or "error" not in results:
-            if len(results) == 0:
+            if isinstance(results, list) and len(results) == 0:
                 answer = f"I couldn't find any records matching your query about '{user_message}'. Would you like to ask about something else?"
+            elif isinstance(results, dict) and "error" in results:
+                answer = f"I had trouble querying the database. Error: {results['error']}"
             else:
                 nl_prompt = NL_RESPONSE_PROMPT.format(
                     user_question=user_message,
@@ -368,24 +463,34 @@ async def chat_completions(request: ChatCompletionRequest):
                 nl_response = client.chat.completions.create(
                     model=MODEL_NAME,
                     messages=[
-                        {"role": "system", "content": "You are a friendly HR assistant."},
+                        {"role": "system",
+                         "content": "You are a friendly HR assistant who explains roster data conversationally."},
                         {"role": "user", "content": nl_prompt}
                     ],
                     temperature=0.3,
-                    max_tokens=300
+                    max_tokens=500
                 )
 
                 answer = nl_response.choices[0].message.content
         else:
             answer = f"I had trouble querying the database. Error: {results.get('error', 'Unknown error')}"
 
+        # Return OpenAI compatible response
         return {
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": answer
+            "id": f"chatcmpl-{int(time.time())}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": "roster-assistant",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": answer
+                    },
+                    "finish_reason": "stop"
                 }
-            }]
+            ]
         }
 
     except Exception as e:
