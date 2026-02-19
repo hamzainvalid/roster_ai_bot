@@ -1,8 +1,8 @@
 fastapi
-uvicorn
-requests
-langchain
-langchain-community
-langchain-openai  # Add this
-google-generativeai
 pydantic
+requests
+langchain-community
+langchain
+langchain-openai
+openai
+SQLAlchemy
