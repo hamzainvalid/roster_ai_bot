@@ -38,12 +38,36 @@ MODEL_NAME = "openrouter/free"
 # ================= SHIFT CODES =================
 
 SHIFT_MEANINGS = {
-    "D":   "Day shift",
-    "N":   "Night shift",
-    "A":   "Afternoon shift",
-    "NP":  "Night Phone (on-call)",
-    "AP":  "Afternoon Phone (on-call)",
-    "OFF": "Off duty / Day off"
+    "A":  "Afternoon shift (14:00–23:00)",
+    "A*":  "Afternoon shift (modified/extended)",
+    "AP":  "Afternoon Phone – on-call afternoon shift",
+    "AP/OT":  "Afternoon Phone / Overtime",
+    "BL":  "Bonus Leave",
+    "D":  "Day shift (06:00–15:00)",
+    "D*":  "Day shift (modified/extended)",
+    "D-OJT":  "Day shift – On-the-Job Training",
+    "D.OT":  "Day shift with Overtime",
+    "DIL":  "Day in Lieu",
+    "DP":  "Day Phone – on-call day shift",
+    "DT":  "Duty Travel",
+    "FL":  "Family Leave",
+    "N":  "Night shift (16:00–22:00)",
+    "NP":  "Night Phone – on-call night shift",
+    "OFF":  "Day off / Rest day",
+    "OFF-OT":  "Day off with Overtime",
+    "OT":  "Overtime",
+    "OT-AP":  "Overtime – Afternoon Phone",
+    "OT-DP":  "Overtime – Day Phone",
+    "PH":  "Public Holiday",
+    "PV":  "Pre-approved Vacation",
+    "SL":  "Sick Leave",
+    "Sick":  "Sick (unplanned)",
+    "T":  "Training",
+    "TRNG":  "Training",
+    "V":  "Annual Leave (Vacation)",
+    "V-Sick":  "Vacation converted to Sick Leave",
+    "Vsick":  "Vacation converted to Sick Leave",
+    "sick":  "Sick (unplanned)",
 }
 
 # ================= FASTAPI =================
