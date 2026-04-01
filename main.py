@@ -159,17 +159,16 @@ SYSTEM_INTENT = f"""You are a roster assistant intent classifier. Today is {TODA
 Classify the user message into ONE of these intents and return ONLY a JSON object:
 
 1. READ   — user wants to query/view roster data
-2. UPDATE — user wants to change/update a shift
-3. SUGGEST— user wants replacement suggestions for an absence
-4. CHAT   — general conversation, not roster related
+2. SUGGEST— user wants replacement suggestions for an absence
+3. CHAT   — general conversation, not roster related
 
 Return format:
-{{"intent": "READ"|"UPDATE"|"SUGGEST"|"CHAT"}}
+{{"intent": "READ"|"SUGGEST"|"CHAT"}}
 
 Examples:
 "Who is working today?" → {{"intent": "READ"}}
 "Show March roster"    → {{"intent": "READ"}}
-"Change Sara to OFF on March 5" → {{"intent": "UPDATE"}}
+"Can Sara take off on March 3?"  → {{"intent": "SUGGEST"}}
 "Sara is sick on April 3, who can replace her?" → {{"intent": "SUGGEST"}}
 "Hi how are you" → {{"intent": "CHAT"}}
 """
@@ -256,18 +255,14 @@ Your job is to suggest smart, fair replacements. Think like a real scheduler:
 
 RULES:
 - Only suggest staff who are working that day (shift != OFF/V/SL etc.)
-- If a staff wants off on a working day check if there are other staff members working in the same shift
-- If no other staff is working on the same shift on the same day, answer no with the relevant reasoning
-- If other staff is working on the same shift on the same day, answer yes with saying which people are working in the same shift
-- Check if suggested staff worked the previous day or will work next day (avoid fatigue)
-- Prefer staff on similar shift times (e.g. replace a Day shift with another Day person)
-- If no same-shift staff available, suggest a shift swap (e.g. move someone from DP to D)
-- Check how many days that person has already worked that week before suggesting overtime
+- If a staff wants off on a working day check if there are other staff members working in the same shift if yes, he/she can take off stating that other staff(with their names) are working in the same shift, if no mention no one is working and ask if you need suggestions to replace shifts for other staffs
+- Prefer staff on similar shift times (e.g. replace a Day shift with another Day person or phone day duty person)
+- If no same-shift staff available, suggest a shift swap for a person working in a shift of more than one person leaving every shift with atleast one staff
 - NEVER suggest someone who is also on leave/off that day
 
 RESPONSE FORMAT:
 - Start with a brief summary of the coverage gap
-- List 2-3 concrete suggestions with reasoning
+- List concrete suggestions if required with reasoning
 - For each suggestion: staff name, what change to make, why they are suitable
 - End with a recommended action (which suggestion is best and why)
 
@@ -344,67 +339,67 @@ def handle_read(message: str, history: list) -> str:
     return llm(SYSTEM_NL, prompt, history, temp=0.3, max_tok=800)
 
 # ── UPDATE PIPELINE ───────────────────────────────────────────────────────────
-def handle_update(message: str, history: list) -> str:
-    raw = llm(SYSTEM_UPDATE, message, history, temp=0.0, max_tok=200)
-    parsed = parse_json_response(raw)
-    logger.info(f"[UPDATE parsed] {parsed}")
-
-    if "error" in parsed:
-        return (f"I understood you want to make a change, but I need more info:\n"
-                f"{parsed.get('message','')}\n\n"
-                f"Example: *\"Change Sara's shift on March 5th to Day shift\"*")
-
-    staff_partial = parsed.get("staff_name", "")
-    date_str      = parsed.get("date", "")
-    new_shift     = parsed.get("new_shift", "")
-
-    if not all([staff_partial, date_str, new_shift]):
-        return ("I need three things to make a change:\n"
-                "- **Who** (staff name)\n- **Which date**\n- **New shift**\n\n"
-                "Example: *\"Set Muawia to OFF on April 10th\"*")
-
-    staff_name = find_staff(staff_partial)
-    if not staff_name:
-        return f"I couldn't find anyone matching **{staff_partial}** in the roster. Try `debug staff` to see all names."
-
-    old_shift = get_shift(staff_name, date_str) or "unknown"
-
-    # Update both main table and monthly table
-    ok = rest_patch("roster", staff_name, date_str, new_shift)
-    try:
-        d = datetime.strptime(date_str, "%Y-%m-%d")
-        tbl = month_table(d.year, d.month)
-        if table_exists(tbl):
-            rest_patch(tbl, staff_name, date_str, new_shift)
-    except Exception as e:
-        logger.warning(f"Monthly table update skipped: {e}")
-
-    if not ok:
-        return (f"❌ Update failed for **{staff_name}** on {fmt_date(date_str)}.\n"
-                f"Check that the name and date exist in the roster.")
-
-    old_label = SHIFT_MEANINGS.get(old_shift, old_shift)
-    new_label = SHIFT_MEANINGS.get(new_shift, new_shift)
-    answer = (f"✅ **Shift updated!**\n\n"
-              f"**Staff:** {staff_name}\n"
-              f"**Date:** {fmt_date(date_str)}\n"
-              f"**Change:** {old_label} → **{new_label}**")
-
-    # Optionally show the month roster after update
-    if parsed.get("show_month"):
-        try:
-            d = datetime.strptime(date_str, "%Y-%m-%d")
-            tbl = month_table(d.year, d.month)
-            rows = rest_get(tbl) if table_exists(tbl) else run_sql(
-                f"SELECT staff_name,date,shift FROM roster "
-                f"WHERE date>='{d.year}-{d.month:02d}-01' AND date<='{d.year}-{d.month:02d}-{calendar.monthrange(d.year,d.month)[1]}' "
-                f"ORDER BY date,staff_name")
-            if rows:
-                answer += "\n\n" + fmt_month_roster(rows, d.year, d.month)
-        except Exception as e:
-            logger.warning(f"Post-update month view failed: {e}")
-
-    return answer
+# def handle_update(message: str, history: list) -> str:
+#     raw = llm(SYSTEM_UPDATE, message, history, temp=0.0, max_tok=200)
+#     parsed = parse_json_response(raw)
+#     logger.info(f"[UPDATE parsed] {parsed}")
+#
+#     if "error" in parsed:
+#         return (f"I understood you want to make a change, but I need more info:\n"
+#                 f"{parsed.get('message','')}\n\n"
+#                 f"Example: *\"Change Sara's shift on March 5th to Day shift\"*")
+#
+#     staff_partial = parsed.get("staff_name", "")
+#     date_str      = parsed.get("date", "")
+#     new_shift     = parsed.get("new_shift", "")
+#
+#     if not all([staff_partial, date_str, new_shift]):
+#         return ("I need three things to make a change:\n"
+#                 "- **Who** (staff name)\n- **Which date**\n- **New shift**\n\n"
+#                 "Example: *\"Set Muawia to OFF on April 10th\"*")
+#
+#     staff_name = find_staff(staff_partial)
+#     if not staff_name:
+#         return f"I couldn't find anyone matching **{staff_partial}** in the roster. Try `debug staff` to see all names."
+#
+#     old_shift = get_shift(staff_name, date_str) or "unknown"
+#
+#     # Update both main table and monthly table
+#     ok = rest_patch("roster", staff_name, date_str, new_shift)
+#     try:
+#         d = datetime.strptime(date_str, "%Y-%m-%d")
+#         tbl = month_table(d.year, d.month)
+#         if table_exists(tbl):
+#             rest_patch(tbl, staff_name, date_str, new_shift)
+#     except Exception as e:
+#         logger.warning(f"Monthly table update skipped: {e}")
+#
+#     if not ok:
+#         return (f"❌ Update failed for **{staff_name}** on {fmt_date(date_str)}.\n"
+#                 f"Check that the name and date exist in the roster.")
+#
+#     old_label = SHIFT_MEANINGS.get(old_shift, old_shift)
+#     new_label = SHIFT_MEANINGS.get(new_shift, new_shift)
+#     answer = (f"✅ **Shift updated!**\n\n"
+#               f"**Staff:** {staff_name}\n"
+#               f"**Date:** {fmt_date(date_str)}\n"
+#               f"**Change:** {old_label} → **{new_label}**")
+#
+#     # Optionally show the month roster after update
+#     if parsed.get("show_month"):
+#         try:
+#             d = datetime.strptime(date_str, "%Y-%m-%d")
+#             tbl = month_table(d.year, d.month)
+#             rows = rest_get(tbl) if table_exists(tbl) else run_sql(
+#                 f"SELECT staff_name,date,shift FROM roster "
+#                 f"WHERE date>='{d.year}-{d.month:02d}-01' AND date<='{d.year}-{d.month:02d}-{calendar.monthrange(d.year,d.month)[1]}' "
+#                 f"ORDER BY date,staff_name")
+#             if rows:
+#                 answer += "\n\n" + fmt_month_roster(rows, d.year, d.month)
+#         except Exception as e:
+#             logger.warning(f"Post-update month view failed: {e}")
+#
+#     return answer
 
 # ── SUGGESTION PIPELINE ───────────────────────────────────────────────────────
 def handle_suggest(message: str, history: list) -> str:
@@ -592,8 +587,8 @@ async def chat(request: ChatRequest):
             intent = get_intent(user_msg)
             logger.info(f"Intent: {intent}")
 
-            if   intent == "UPDATE":  answer = handle_update(user_msg, history[:-1])
-            elif intent == "SUGGEST": answer = handle_suggest(user_msg, history[:-1])
+            # if   intent == "UPDATE":  answer = handle_update(user_msg, history[:-1])
+            if intent == "SUGGEST": answer = handle_suggest(user_msg, history[:-1])
             elif intent == "READ":    answer = handle_read(user_msg, history[:-1])
             else:                     answer = llm(SYSTEM_NL, user_msg, history[:-1], temp=0.7, max_tok=400)
 
