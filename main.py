@@ -532,6 +532,32 @@ async def chat(request: ChatRequest):
                 user_msg = m.content
             history.append({"role": m.role, "content": m.content})
 
+        meta_keywords = [
+            "### Task:",
+            "Suggest 3-5 relevant follow-up questions",
+            "Generate a concise, 3-5 word title with an emoji",
+            "Generate 1-3 broad tags categorizing",
+            "summarizing the chat history"
+        ]
+
+        if any(keyword in user_msg for keyword in meta_keywords):
+            logger.info(f"Skipping OpenWebUI meta-prompt: {user_msg[:100]}")
+            # Return a minimal response that OpenWebUI will ignore
+            return {
+                "id": f"chatcmpl-{int(time.time())}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": "roster-assistant",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": ""  # Empty response won't trigger more prompts
+                    },
+                    "finish_reason": "stop"
+                }],
+            }
+
         if not user_msg:
             user_msg = "Hello"
         logger.info(f"User: {user_msg[:100]}")
