@@ -193,7 +193,6 @@ DATE RULES — date column is TEXT 'YYYY-MM-DD', today = {TODAY}:
 TABLE RULES:
 - Never query from the main table
 - Specific month query → use roster_YYYY_MM table (faster)
-- Multi-month or unspecified → use roster
 - Use ILIKE for name matching
 - For staff names, ALWAYS use: staff_name ILIKE '%<name>%' with wildcards
 - When searching for multiple names, use OR conditions with wildcards
