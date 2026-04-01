@@ -406,62 +406,76 @@ def handle_read(message: str, history: list) -> str:
 def handle_suggest(message: str, history: list) -> str:
     # First extract who/when from the message
     extract_prompt = f"""Extract the staff member and date from this message.
-Today is {TODAY}.
-Return JSON only: {{"staff_name": "...", "date": "YYYY-MM-DD"}}
-Message: {message}"""
+    Today is {TODAY}.
+    Return JSON only: {{"staff_name": "...", "date": "YYYY-MM-DD"}}
+    Message: {message}"""
     raw = llm("You extract info from text. Return only JSON.", extract_prompt, temp=0.0, max_tok=100)
     info = parse_json_response(raw)
 
     staff_partial = info.get("staff_name", "")
-    date_str      = info.get("date", "")
+    date_str = info.get("date", "")
 
     if not staff_partial or not date_str:
         return ("To suggest a replacement I need to know:\n"
                 "- **Who** is absent\n- **Which date**\n\n"
                 "Example: *\"Sara is sick on March 15th, who can cover her?\"*")
 
-    staff_name = find_staff(staff_partial)
-    if not staff_name:
-        return f"I couldn't find **{staff_partial}** in the roster. Try `debug staff`."
-
-    # Get the absent person's usual shift on that date
-    absent_shift = get_shift(staff_name, date_str) or "D"
-
-    # Get all staff schedules for that date ± 2 days for fatigue context
+    # Determine which monthly table to use based on the date
     try:
         dt = datetime.strptime(date_str, "%Y-%m-%d")
-        d_minus2 = (dt - timedelta(days=2)).strftime("%Y-%m-%d")
-        d_plus2  = (dt + timedelta(days=2)).strftime("%Y-%m-%d")
+        table_name = month_table(dt.year, dt.month)
+
+        # Check if the monthly table exists
+        if not table_exists(table_name):
+            return f"I don't have data for {dt.strftime('%B %Y')}. Available tables: {', '.join(get_monthly_tables()[:5])}..."
     except:
-        d_minus2 = date_str
-        d_plus2  = date_str
+        table_name = "roster"
+        logger.warning(f"Could not parse date {date_str}, falling back to roster table")
+
+    # Find staff in the monthly table
+    safe_name = staff_partial.replace("'", "''")
+    staff_result = run_sql(f"""
+        SELECT DISTINCT staff_name FROM {table_name} 
+        WHERE staff_name ILIKE '%{safe_name}%' 
+        LIMIT 5
+    """)
+
+    if not staff_result:
+        return f"I couldn't find **{staff_partial}** in the {dt.strftime('%B %Y')} roster. Try `debug staff` to see all staff names."
+
+    staff_name = staff_result[0]["staff_name"]
+
+    # Get the absent person's shift on that date
+    shift_result = run_sql(f"""
+        SELECT shift FROM {table_name} 
+        WHERE staff_name='{staff_name}' AND date='{date_str}' 
+        LIMIT 1
+    """)
 
     context_rows = run_sql(
-        f"SELECT staff_name, date, shift FROM roster "
-        f"WHERE date>='{d_minus2}' AND date<='{d_plus2}' "
+        f"SELECT staff_name, date, shift FROM {table_name} "
+        f"WHERE date='{dt}'"
         f"ORDER BY staff_name, date")
 
-    # Get full month for workload context
-    try:
-        month_rows = run_sql(
-            f"SELECT staff_name, date, shift FROM roster "
-            f"WHERE date>='{dt.year}-{dt.month:02d}-01' "
-            f"AND date<='{dt.year}-{dt.month:02d}-{calendar.monthrange(dt.year,dt.month)[1]}' "
-            f"ORDER BY staff_name, date")
-    except:
-        month_rows = []
+    # Get full month for workload context from the same monthly table
+    # try:
+    #     month_rows = run_sql(
+    #         f"SELECT staff_name, date, shift FROM {table_name} "
+    #         f"WHERE date='{dt.year}-{dt.month:02d}-01' "
+    #         f"AND date<='{dt.year}-{dt.month:02d}-{calendar.monthrange(dt.year, dt.month)[1]}' "
+    #         f"ORDER BY staff_name, date")
+    # except:
+    #     month_rows = []
 
     # Build context string
-    context_str  = json.dumps(context_rows,  default=str)
-    month_str    = json.dumps(month_rows[:200], default=str)
+    context_str = json.dumps(context_rows, default=str)
+    # month_str = json.dumps(month_rows[:200], default=str)
 
     user_prompt = (
-        f"ABSENT STAFF: {staff_name}\n"
+        f"STAFF: {staff_name}\n"
         f"DATE: {fmt_date(date_str)} ({date_str})\n"
-        f"THEIR SHIFT: {absent_shift} ({SHIFT_MEANINGS.get(absent_shift, absent_shift)})\n\n"
-        f"ALL STAFF SCHEDULES (±2 days around absence date):\n{context_str}\n\n"
-        f"FULL MONTH WORKLOAD (for fatigue/fairness check):\n{month_str}\n\n"
-        f"Please analyse and suggest the best 2-3 replacement options."
+        f"CONTEXT (all staff schedules on that day from {table_name}):\n{context_str}\n\n"
+        f"Please analyse and suggest the best replacement or replacements option considering fatigue, fairness, and shift compatibility."
     )
 
     return llm(SYSTEM_SUGGEST, user_prompt, history, temp=0.4, max_tok=1000)
