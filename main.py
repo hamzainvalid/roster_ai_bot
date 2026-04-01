@@ -159,7 +159,7 @@ SYSTEM_INTENT = f"""You are a roster assistant intent classifier. Today is {TODA
 Classify the user message into ONE of these intents and return ONLY a JSON object:
 
 1. READ   — user wants to query/view roster data
-2. SUGGEST— user wants replacement suggestions for an absence
+2. SUGGEST— user wants to inquire about their duty replacement(if possible or not) with reasoning and suggestions for replacement or duty change if requested
 3. CHAT   — general conversation, not roster related
 
 Return format:
@@ -192,7 +192,7 @@ DATE RULES — date column is TEXT 'YYYY-MM-DD', today = {TODAY}:
 
 TABLE RULES:
 - Never query from the main table
-- Specific month query → use roster_YYYY_MM table (faster)
+- Only use Monthly table → use roster_YYYY_MM table
 - Use ILIKE for name matching
 - For staff names, ALWAYS use: staff_name ILIKE '%<name>%' with wildcards
 - When searching for multiple names, use OR conditions with wildcards
@@ -247,11 +247,11 @@ Return ONLY the JSON.
 SYSTEM_SUGGEST = f"""You are an expert CAMO roster manager. Today is {TODAY}.
 
 You will be given:
-1. The absent staff member's name, date, and their usual shift
-2. All other staff schedules for that date AND surrounding days (±2 days for context)
+1. The staff member's name, date, and their usual shift
+2. All other staff schedules for that date
 3. The full month's roster data
 
-Your job is to suggest smart, fair replacements. Think like a real scheduler:
+Your job is to assess user's request such as is it possible for "qadir" to take off in 03 Mar 2025. Your job is to suggest smart, fair replacements if requested. Think like a real scheduler. Use the following rules to answer the user accordingly:
 
 RULES:
 - Only suggest staff who are working that day (shift != OFF/V/SL etc.)
@@ -260,7 +260,6 @@ RULES:
 - If no same-shift staff available, suggest a shift swap for a person working in a shift of more than one person leaving every shift with atleast one staff
 - NEVER suggest someone who is also on leave/off that day
 - Never suggest someone from other days
-- Never refer to the 'roster' table
 
 RESPONSE FORMAT:
 - Start with a brief summary of the coverage gap
@@ -406,7 +405,7 @@ def handle_read(message: str, history: list) -> str:
 # ── SUGGESTION PIPELINE ───────────────────────────────────────────────────────
 def handle_suggest(message: str, history: list) -> str:
     # First extract who/when from the message
-    extract_prompt = f"""Extract the absent staff member and date from this message.
+    extract_prompt = f"""Extract the staff member and date from this message.
 Today is {TODAY}.
 Return JSON only: {{"staff_name": "...", "date": "YYYY-MM-DD"}}
 Message: {message}"""
