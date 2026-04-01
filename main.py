@@ -1,636 +1,564 @@
-import os
-import time
-import requests
-import re
-import json
-from datetime import datetime
+import os, time, requests, re, json, calendar, logging
+from datetime import datetime, timedelta
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 from openai import OpenAI
-import logging
-import calendar
 
-# ================= LOGGING =================
-
+# ── LOGGING ──────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ================= ENV VARIABLES =================
+# ── ENV ───────────────────────────────────────────────────────────────────────
+SUPABASE_URL  = os.environ.get("SUPABASE_URL", "").rstrip("/")
+SUPABASE_KEY  = os.environ.get("SUPABASE_SERVICE_KEY", "")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_2")
+# ── OPENAI CLIENT ─────────────────────────────────────────────────────────────
+client = OpenAI(api_key=OPENAI_API_KEY)
+MODEL  = "gpt-4o-mini"   # $0.15/M input · $0.60/M output — reliable, fast, cheap
 
-# ================= OPENROUTER CLIENT =================
-
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=DEEPSEEK_API_KEY,
-    default_headers={
-        "HTTP-Referer": "https://roster-ai-bot.onrender.com",
-        "X-Title": "Roster Chatbot",
-    }
-)
-
-MODEL_NAME = "deepseek/deepseek-chat:free"
-
-# ================= SHIFT CODES =================
-
+# ── SHIFT CODES ───────────────────────────────────────────────────────────────
 SHIFT_MEANINGS = {
-    "A": "Afternoon shift (14:00-23:00)",
-    "A*": "Afternoon shift (modified/extended)",
-    "AP": "Afternoon Phone - on-call afternoon shift",
-    "AP/OT": "Afternoon Phone / Overtime",
-    "BL": "Bonus Leave",
-    "D": "Day shift (06:00-15:00)",
-    "D*": "Day shift (modified/extended)",
-    "D-OJT": "Day shift - On-the-Job Training",
-    "D.OT": "Day shift with Overtime",
-    "DIL": "Day in Lieu",
-    "DP": "Day Phone - on-call day shift",
-    "DT": "Duty Travel",
-    "FL": "Family Leave",
-    "N": "Night shift (16:00-22:00)",
-    "NP": "Night Phone - on-call night shift",
-    "OFF": "Day off / Rest day",
-    "OFF-OT": "Day off with Overtime",
-    "OT": "Overtime",
-    "OT-AP": "Overtime - Afternoon Phone",
-    "OT-DP": "Overtime - Day Phone",
-    "PH": "Public Holiday",
-    "PV": "Pre-approved Vacation",
-    "Sick": "Sick (unplanned)",
-    "SL": "Sick Leave",
-    "T": "Training",
-    "TRNG": "Training",
-    "V": "Annual Leave (Vacation)",
+    "D":      "Day shift (06:00–15:00)",
+    "D*":     "Day shift – modified/extended hours",
+    "D-OJT":  "Day shift – On-the-Job Training",
+    "D.OT":   "Day shift with Overtime",
+    "DP":     "Day Phone – on-call during day hours",
+    "A":      "Afternoon shift (14:00–23:00)",
+    "A*":     "Afternoon shift – modified/extended hours",
+    "AP":     "Afternoon Phone – on-call during afternoon hours",
+    "AP/OT":  "Afternoon Phone with Overtime",
+    "N":      "Night shift (16:00–22:00)",
+    "NP":     "Night Phone – on-call during night hours",
+    "OFF":    "Day off / Rest day",
+    "OFF-OT": "Day off with Overtime called in",
+    "OT":     "Overtime",
+    "OT-AP":  "Overtime covering Afternoon Phone",
+    "OT-DP":  "Overtime covering Day Phone",
+    "V":      "Annual Leave (Vacation)",
+    "PV":     "Pre-approved Vacation",
+    "SL":     "Sick Leave (planned)",
+    "Sick":   "Sick (unplanned, same day)",
+    "sick":   "Sick (unplanned, same day)",
     "V-Sick": "Vacation converted to Sick Leave",
-    "Vsick": "Vacation converted to Sick Leave",
-    "sick": "Sick (unplanned)",
+    "Vsick":  "Vacation converted to Sick Leave",
+    "BL":     "Bonus Leave",
+    "FL":     "Family Leave",
+    "DIL":    "Day in Lieu",
+    "T":      "Training",
+    "TRNG":   "Training",
+    "DT":     "Duty Travel",
+    "PH":     "Public Holiday",
 }
 
-# ================= FASTAPI =================
+# Shifts that count as "absent / not working"
+ABSENT_SHIFTS = {"OFF", "V", "PV", "SL", "Sick", "sick", "V-Sick", "Vsick", "BL", "FL", "DIL"}
+# Shifts that are actual working shifts
+WORKING_SHIFTS = {"D", "D*", "DP", "A", "A*", "AP", "N", "NP", "D-OJT", "D.OT",
+                  "OT", "OT-AP", "OT-DP", "OFF-OT", "T", "TRNG", "DT", "PH"}
 
-app = FastAPI(title="Roster Chatbot API")
+# ── FASTAPI ───────────────────────────────────────────────────────────────────
+app = FastAPI(title="CAMO Roster Chatbot")
+app.add_middleware(CORSMiddleware, allow_origins=["*"],
+                   allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-# ================= SUPABASE HELPERS =================
-
-def _headers():
-    return {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-    }
-
+# ── SUPABASE HELPERS ──────────────────────────────────────────────────────────
+def _h():
+    return {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json"}
 
 def run_sql(sql: str) -> list:
-    """Run a SELECT query via run_sql RPC."""
-    if not sql:
-        return []
     try:
-        clean = sql.strip().rstrip(";")
-        logger.info(f"[SQL] {clean[:200]}")
-        resp = requests.post(
-            f"{SUPABASE_URL}/rest/v1/rpc/run_sql",
-            headers=_headers(),
-            json={"query": clean},
-            timeout=30,
-        )
+        resp = requests.post(f"{SUPABASE_URL}/rest/v1/rpc/run_sql",
+                             headers=_h(), json={"query": sql.strip().rstrip(";")}, timeout=30)
         if resp.status_code != 200:
-            logger.error(f"Supabase error {resp.status_code}: {resp.text[:300]}")
+            logger.error(f"SQL error {resp.status_code}: {resp.text[:200]}")
             return []
-        result = resp.json()
-        return result if isinstance(result, list) else []
+        r = resp.json()
+        return r if isinstance(r, list) else []
     except Exception as e:
-        logger.error(f"run_sql error: {e}")
+        logger.error(f"run_sql: {e}")
         return []
 
-
-def rest_update(table: str, staff_name: str, date: str, new_shift: str) -> bool:
-    """Update a single shift via REST PATCH."""
+def rest_patch(table: str, staff_name: str, date: str, new_shift: str) -> bool:
     try:
         resp = requests.patch(
             f"{SUPABASE_URL}/rest/v1/{table}",
-            headers={**_headers(), "Prefer": "return=representation"},
+            headers={**_h(), "Prefer": "return=minimal"},
             params={"staff_name": f"eq.{staff_name}", "date": f"eq.{date}"},
-            json={"shift": new_shift},
-            timeout=30,
-        )
-        logger.info(f"[UPDATE] {table} | {staff_name} | {date} → {new_shift} | status={resp.status_code}")
+            json={"shift": new_shift}, timeout=30)
         return resp.status_code in (200, 204)
     except Exception as e:
-        logger.error(f"rest_update error: {e}")
+        logger.error(f"rest_patch: {e}")
         return False
 
-
-def rest_get_month(table: str) -> list:
-    """Fetch all rows for a monthly table via REST."""
+def rest_get(table: str, params: dict = None) -> list:
     try:
-        resp = requests.get(
-            f"{SUPABASE_URL}/rest/v1/{table}",
-            headers=_headers(),
-            params={"select": "staff_name,staff_id,date,shift", "order": "date,staff_name"},
-            timeout=30,
+        p = {"select": "staff_name,staff_id,date,shift", "order": "date,staff_name"}
+        if params:
+            p.update(params)
+        resp = requests.get(f"{SUPABASE_URL}/rest/v1/{table}", headers=_h(), params=p, timeout=30)
+        return resp.json() if resp.status_code == 200 else []
+    except Exception as e:
+        logger.error(f"rest_get: {e}")
+        return []
+
+def table_exists(t: str) -> bool:
+    r = run_sql(f"SELECT 1 FROM information_schema.tables WHERE table_name='{t}' AND table_schema='public'")
+    return bool(r)
+
+def month_table(y: int, m: int) -> str:
+    return f"roster_{y:04d}_{m:02d}"
+
+def get_monthly_tables() -> list[str]:
+    r = run_sql("SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'roster_%_%' AND table_schema='public' ORDER BY table_name")
+    return [x["table_name"] for x in r if x.get("table_name")]
+
+def find_staff(partial: str) -> Optional[str]:
+    safe = partial.replace("'", "''")
+    r = run_sql(f"SELECT DISTINCT staff_name FROM roster WHERE staff_name ILIKE '%{safe}%' LIMIT 5")
+    return r[0]["staff_name"] if r else None
+
+def get_shift(staff_name: str, date: str, table: str = "roster") -> Optional[str]:
+    safe = staff_name.replace("'", "''")
+    r = run_sql(f"SELECT shift FROM {table} WHERE staff_name='{safe}' AND date='{date}' LIMIT 1")
+    return r[0]["shift"] if r else None
+
+def fmt_date(d: str) -> str:
+    try:
+        dt = datetime.strptime(d.split()[0], "%Y-%m-%d")
+        day = dt.day
+        sfx = "th" if 10 <= day <= 20 else {1:"st",2:"nd",3:"rd"}.get(day%10,"th")
+        return dt.strftime(f"%B {day}{sfx}, %Y")
+    except:
+        return d
+
+# ── SCHEMA ────────────────────────────────────────────────────────────────────
+def load_schema():
+    try:
+        cols = run_sql("SELECT column_name, data_type FROM information_schema.columns WHERE table_name='roster' ORDER BY ordinal_position")
+        desc = ", ".join(
+            f"{c['column_name']} TEXT('YYYY-MM-DD')" if c.get("column_name") == "date"
+            else f"{c.get('column_name')} {c.get('data_type')}" for c in cols
         )
-        if resp.status_code == 200:
-            return resp.json()
-        return []
-    except Exception as e:
-        logger.error(f"rest_get_month error: {e}")
-        return []
+        return f"roster({desc})" if desc else "roster(id, staff_name TEXT, staff_id TEXT, date TEXT, shift TEXT)"
+    except:
+        return "roster(id, staff_name TEXT, staff_id TEXT, date TEXT, shift TEXT)"
 
+SCHEMA = load_schema()
+TODAY  = datetime.now().strftime("%Y-%m-%d")
+CUR_Y, CUR_M = datetime.now().year, datetime.now().month
 
-def table_exists(table: str) -> bool:
-    """Check if a monthly table exists."""
-    rows = run_sql(f"""
-        SELECT 1 FROM information_schema.tables
-        WHERE table_name = '{table}' AND table_schema = 'public'
-    """)
-    return bool(rows)
+# ── PROMPTS ───────────────────────────────────────────────────────────────────
+SHIFTS_JSON = json.dumps(SHIFT_MEANINGS, indent=2)
 
+SYSTEM_INTENT = f"""You are a roster assistant intent classifier. Today is {TODAY}.
 
-def month_table(year: int, month: int) -> str:
-    return f"roster_{year:04d}_{month:02d}"
+Classify the user message into ONE of these intents and return ONLY a JSON object:
 
+1. READ   — user wants to query/view roster data
+2. UPDATE — user wants to change/update a shift
+3. SUGGEST— user wants replacement suggestions for an absence
+4. CHAT   — general conversation, not roster related
 
-def get_available_months() -> list[str]:
-    rows = run_sql("""
-        SELECT table_name FROM information_schema.tables
-        WHERE table_name LIKE 'roster_%_%' AND table_schema = 'public'
-        ORDER BY table_name
-    """)
-    return [r["table_name"] for r in rows if r.get("table_name")]
+Return format:
+{{"intent": "READ"|"UPDATE"|"SUGGEST"|"CHAT"}}
 
+Examples:
+"Who is working today?" → {{"intent": "READ"}}
+"Show March roster"    → {{"intent": "READ"}}
+"Change Sara to OFF on March 5" → {{"intent": "UPDATE"}}
+"Sara is sick on April 3, who can replace her?" → {{"intent": "SUGGEST"}}
+"Hi how are you" → {{"intent": "CHAT"}}
+"""
 
-# ================= SCHEMA LOADER =================
-
-def load_schema() -> dict:
-    try:
-        col_resp = run_sql("""
-            SELECT column_name, data_type
-            FROM information_schema.columns
-            WHERE table_name = 'roster'
-            ORDER BY ordinal_position
-        """)
-        if col_resp:
-            cols = []
-            for c in col_resp:
-                name = c.get("column_name", "")
-                dtype = c.get("data_type", "")
-                if name == "date":
-                    cols.append("date TEXT (format: 'YYYY-MM-DD')")
-                else:
-                    cols.append(f"{name} {dtype}")
-            schema_str = "Table: roster(" + ", ".join(cols) + ")"
-        else:
-            raise ValueError("No columns returned")
-
-        shift_resp = run_sql("SELECT DISTINCT shift FROM roster WHERE shift IS NOT NULL AND shift != '' LIMIT 30")
-        shift_codes = [r["shift"] for r in shift_resp if r.get("shift")] if shift_resp else list(SHIFT_MEANINGS.keys())
-
-        return {"schema": schema_str, "shift_codes": shift_codes}
-    except Exception as e:
-        logger.warning(f"Schema load fallback: {e}")
-        return {
-            "schema": "Table: roster(id BIGINT, staff_name TEXT, staff_id TEXT, date TEXT (format: 'YYYY-MM-DD'), shift TEXT)",
-            "shift_codes": list(SHIFT_MEANINGS.keys()),
-        }
-
-
-DB_SCHEMA = load_schema()
-logger.info(f"Schema: {DB_SCHEMA['schema']}")
-
-# ================= PROMPT TEMPLATES =================
-
-SYSTEM_SQL = f"""You are a PostgreSQL expert. Convert natural language into a single SQL SELECT query.
+SYSTEM_SQL = f"""You are a PostgreSQL expert. Convert natural language to a single SQL SELECT query.
 
 SCHEMA:
-Main table: roster(id, staff_name TEXT, staff_id TEXT, date TEXT 'YYYY-MM-DD', shift TEXT)
-Monthly tables: roster_YYYY_MM  e.g. roster_2026_03 — same columns, only that month's data.
+Main table: {SCHEMA}
+Monthly tables: roster_YYYY_MM (same columns, one month each) e.g. roster_2026_03
 
 SHIFT CODES:
-{json.dumps(SHIFT_MEANINGS, indent=2)}
+{SHIFTS_JSON}
 
-DATE RULES (date column is TEXT format 'YYYY-MM-DD'):
-- Today:      date = CURRENT_DATE::TEXT
-- Tomorrow:   date = (CURRENT_DATE + 1)::TEXT
-- This week:  date >= CURRENT_DATE::TEXT AND date <= (CURRENT_DATE + 6)::TEXT
-- Next week:  date >= (CURRENT_DATE + 7)::TEXT AND date <= (CURRENT_DATE + 13)::TEXT
-- A specific month: use the monthly table roster_YYYY_MM instead of roster
-- Named day:  to_char(date::date, 'Day') ILIKE 'Monday%'
+DATE RULES — date column is TEXT 'YYYY-MM-DD', today = {TODAY}:
+- Today:      date = '{TODAY}'
+- Tomorrow:   date = '{(datetime.now()+timedelta(days=1)).strftime("%Y-%m-%d")}'
+- This week:  date >= '{TODAY}' AND date <= '{(datetime.now()+timedelta(days=6)).strftime("%Y-%m-%d")}'
+- Next month: use table roster_{CUR_Y}_{(CUR_M%12)+1:02d}
+- This month: use table roster_{CUR_Y}_{CUR_M:02d}
+- Named day:  to_char(date::date,'Day') ILIKE 'Monday%'
 
-TABLE SELECTION RULES:
-- For queries about a specific month (e.g. "March 2026", "next month"): use roster_YYYY_MM
-- For queries spanning multiple months or no specific month: use roster
-- Current date context: {datetime.now().strftime('%Y-%m-%d')} (use this to resolve "next month", "this month" etc.)
+TABLE RULES:
+- Specific month query → use roster_YYYY_MM table (faster)
+- Multi-month or unspecified → use roster
+- Use ILIKE for name matching
 
-RULES:
-- Output ONLY the SQL query, nothing else
-- No markdown, no backticks, no semicolons, no explanations
-- Always SELECT (never INSERT/UPDATE/DELETE)
-- Use ILIKE for case-insensitive name matching
+OUTPUT: Only the SQL query. No markdown, no backticks, no semicolons.
 """
 
-SYSTEM_NL = f"""You are a friendly, helpful HR assistant for a roster/scheduling system.
-Your job is to explain database results and changes in clear, natural, conversational English.
+SYSTEM_UPDATE = f"""You are a roster update parser. Today is {TODAY}.
 
-SHIFT MEANINGS:
-{json.dumps(SHIFT_MEANINGS, indent=2)}
-
-GUIDELINES:
-- Use full shift names (e.g. "Day shift", not "D")
-- Format dates nicely (e.g. "March 15th, 2026")
-- "OFF" means the person is off duty
-- Be warm, concise, and professional
-- For lists, use natural language with commas and "and"
-- For counts: "there is 1 person" vs "there are 3 people"
-- When reporting a change, clearly state: who, what date, old shift → new shift
-- When showing a month roster, format it as a clean readable summary
-"""
-
-SYSTEM_UPDATE = f"""You are a roster update parser. Extract shift change details from natural language.
-
-Today is {datetime.now().strftime('%Y-%m-%d')}.
-
-Your job: parse the user's message and return a JSON object with these fields:
+Parse the user message and return ONLY a JSON object:
 {{
-  "action": "update",
-  "staff_name": "<full or partial name>",
+  "staff_name": "<name as mentioned>",
   "date": "<YYYY-MM-DD>",
-  "new_shift": "<shift code>",
-  "show_month": true/false
+  "new_shift": "<shift code from list>",
+  "show_month": true/false,
+  "reason": "<why if mentioned, else null>"
 }}
 
-SHIFT CODES: {json.dumps(list(SHIFT_MEANINGS.keys()))}
+Valid shift codes: {json.dumps(list(SHIFT_MEANINGS.keys()))}
 
-RULES:
-- "next Monday" / "this Friday" etc → resolve to actual YYYY-MM-DD dates
-- If user says "change to day shift" → new_shift = "D"
-- If user says "give him a day off" → new_shift = "OFF"
-- If user says "put on afternoon" → new_shift = "A"
-- set show_month = true if user wants to see the updated month roster
-- If you cannot confidently parse all fields, return {{"action": "unclear"}}
-- Return ONLY the JSON object, no explanation
+Mapping hints:
+"day off" / "off" → "OFF"
+"day shift" / "day" → "D"
+"afternoon" → "A"
+"afternoon phone" → "AP"
+"night" → "N"
+"sick" → "Sick"
+"vacation" / "leave" → "V"
+"training" → "T"
+
+Set show_month=true if user asks to see the updated roster/schedule.
+If you can't parse confidently, return {{"error": "unclear", "message": "<what's missing>"}}.
+Return ONLY the JSON.
 """
 
+SYSTEM_SUGGEST = f"""You are an expert CAMO roster manager. Today is {TODAY}.
 
-# ================= HELPERS =================
+You will be given:
+1. The absent staff member's name, date, and their usual shift
+2. All other staff schedules for that date AND surrounding days (±2 days for context)
+3. The full month's roster data
 
-def clean_sql(raw: str) -> str:
-    if not raw:
-        return ""
-    raw = re.sub(r"```(?:sql)?", "", raw, flags=re.IGNORECASE).strip()
-    raw = raw.rstrip(";").strip()
-    m = re.search(r"(SELECT\s.+)", raw, re.IGNORECASE | re.DOTALL)
-    return m.group(1).strip() if m else raw.strip()
+Your job is to suggest smart, fair replacements. Think like a real scheduler:
 
+RULES:
+- Only suggest staff who are working that day (shift != OFF/V/SL etc.)
+- Check if suggested staff worked the previous day or will work next day (avoid fatigue)
+- Prefer staff on similar shift times (e.g. replace a Day shift with another Day person)
+- If no same-shift staff available, suggest a shift swap (e.g. move someone from DP to D)
+- Check how many days that person has already worked that week before suggesting overtime
+- NEVER suggest someone who is also on leave/off that day
 
-def format_date(date_str: str) -> str:
-    if not date_str:
-        return date_str
+RESPONSE FORMAT:
+- Start with a brief summary of the coverage gap
+- List 2-3 concrete suggestions with reasoning
+- For each suggestion: staff name, what change to make, why they are suitable
+- End with a recommended action (which suggestion is best and why)
+
+Be concise, practical, and specific. Use actual names from the data.
+"""
+
+SYSTEM_NL = f"""You are a friendly, professional HR assistant for a CAMO aviation department roster.
+
+SHIFT MEANINGS:
+{SHIFTS_JSON}
+
+RESPONSE RULES:
+- Use full shift names ("Day shift", not "D")
+- Format dates nicely ("March 5th, 2026")
+- OFF = day off / rest day
+- Be warm, concise, professional
+- For staff lists use natural language with commas and "and"
+- Grammar: "there is 1 person" vs "there are 3 people"
+- When showing a change: bold the key info — who, date, old→new shift
+- Keep responses focused and scannable
+"""
+
+# ── LLM CALLS ─────────────────────────────────────────────────────────────────
+def llm(system: str, user: str, history: list = None, temp: float = 0.2, max_tok: int = 600) -> str:
+    msgs = [{"role": "system", "content": system}]
+    if history:
+        msgs.extend(history[-8:])
+    msgs.append({"role": "user", "content": user})
     try:
-        part = str(date_str).split(" ")[0].split("T")[0]
-        d = datetime.strptime(part, "%Y-%m-%d")
-        day = d.day
-        suffix = "th" if 10 <= day <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
-        return d.strftime(f"%B {day}{suffix}, %Y")
-    except Exception:
-        return date_str
+        resp = client.chat.completions.create(
+            model=MODEL, messages=msgs, temperature=temp, max_tokens=max_tok)
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error(f"LLM error: {e}")
+        return ""
 
-
-def is_update_intent(text: str) -> bool:
-    keywords = [
-        "change", "update", "modify", "swap", "switch", "move",
-        "set", "put", "assign", "replace", "edit", "reschedule",
-        "give him", "give her", "make him", "make her"
-    ]
-    lower = text.lower()
-    return any(k in lower for k in keywords)
-
-
-def is_roster_question(text: str) -> bool:
-    keywords = [
-        "who", "shift", "working", "roster", "schedule", "off", "today",
-        "tomorrow", "week", "night", "day", "afternoon", "on call", "staff",
-        "when", "what", "show", "list", "how many", "available", "leave",
-        "month", "next month", "this month"
-    ]
-    lower = text.lower()
-    return any(k in lower for k in keywords)
-
-
-def get_available_dates() -> list[str]:
-    rows = run_sql("SELECT DISTINCT date FROM roster ORDER BY date LIMIT 10")
-    return [format_date(r["date"]) for r in rows if r.get("date")]
-
-
-def format_month_roster(rows: list, year: int, month: int) -> str:
-    """Format monthly roster rows into a readable markdown table."""
-    if not rows:
-        return "No data found."
-    month_name = datetime(year, month, 1).strftime("%B %Y")
-    days = sorted(set(r["date"] for r in rows))
-    staff = sorted(set(r["staff_name"] for r in rows))
-    lookup = {(r["staff_name"], r["date"]): r["shift"] for r in rows}
-
-    lines = [f"**{month_name} Roster**\n"]
-    for s in staff:
-        shifts = []
-        for d in days:
-            shift = lookup.get((s, d), "-")
-            day_num = d.split("-")[2].lstrip("0")
-            shifts.append(f"{day_num}:{shift}")
-        lines.append(f"**{s}**: " + "  ".join(shifts))
-    return "\n".join(lines)
-
-
-# ================= PYDANTIC MODELS =================
-
-class Message(BaseModel):
-    role: str
-    content: str
-
-
-class ChatRequest(BaseModel):
-    model: str = "roster-assistant"
-    messages: List[Message]
-    temperature: Optional[float] = 0.7
-
-
-# ================= BUILT-IN COMMANDS =================
-
-HELP_TEXT = """
-**Roster Chatbot — Help**
-
-**Read the roster:**
-- "Who is working today?"
-- "Who's on night shift tomorrow?"
-- "Show me the roster for March 2026"
-- "What is Sara's shift on February 18th?"
-- "Who is off next week?"
-
-**Make changes:**
-- "Change Sara's shift on March 5th to Day shift"
-- "Give Muawia a day off on April 10th"
-- "Update Gatot's shift on March 20 to Afternoon"
-- "Switch Qadir's shift on the 15th to OFF and show me the March roster"
-
-**Debug commands:**
-- `debug dates` — show available dates
-- `debug staff` — list all staff
-- `debug shifts` — show shift code meanings
-- `debug months` — show all monthly tables
-- `help` — this message
-""".strip()
-
-
-async def handle_builtin(cmd: str) -> Optional[str]:
-    cmd_lower = cmd.strip().lower()
-    if cmd_lower == "help":
-        return HELP_TEXT
-    if cmd_lower == "debug dates":
-        rows = run_sql("SELECT DISTINCT date FROM roster ORDER BY date LIMIT 30")
-        dates = [format_date(r["date"]) for r in rows if r.get("date")]
-        return "**Dates in DB:**\n" + "\n".join(f"• {d}" for d in dates)
-    if cmd_lower == "debug staff":
-        rows = run_sql("SELECT DISTINCT staff_name FROM roster ORDER BY staff_name")
-        names = [r["staff_name"] for r in rows if r.get("staff_name")]
-        return f"**Staff ({len(names)}):**\n" + ", ".join(names)
-    if cmd_lower == "debug shifts":
-        return "**Shift Codes:**\n" + "\n".join(f"• **{k}** — {v}" for k, v in SHIFT_MEANINGS.items())
-    if cmd_lower == "debug months":
-        tables = get_available_months()
-        return f"**Monthly tables ({len(tables)}):**\n" + "\n".join(f"• {t}" for t in tables)
-    return None
-
-
-# ================= UPDATE PIPELINE =================
-
-def parse_update_intent(user_message: str, history: list[dict]) -> dict:
-    """Ask LLM to parse the update request into structured JSON."""
-    messages = [{"role": "system", "content": SYSTEM_UPDATE}]
-    for msg in history[-4:]:
-        messages.append(msg)
-    messages.append({"role": "user", "content": user_message})
-
-    resp = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=messages,
-        temperature=0.0,
-        max_tokens=200,
-    )
-    raw = resp.choices[0].message.content.strip()
-    # Strip any markdown fences
+def parse_json_response(raw: str) -> dict:
     raw = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
     try:
         return json.loads(raw)
-    except Exception:
-        logger.warning(f"Could not parse update JSON: {raw}")
-        return {"action": "unclear"}
+    except:
+        return {}
 
+def get_intent(message: str) -> str:
+    raw = llm(SYSTEM_INTENT, message, temp=0.0, max_tok=30)
+    d = parse_json_response(raw)
+    return d.get("intent", "CHAT")
 
-def find_staff_name(partial: str) -> Optional[str]:
-    """Fuzzy-match a partial staff name to the exact DB name."""
-    safe = partial.replace("'", "''")
-    rows = run_sql(f"SELECT DISTINCT staff_name FROM roster WHERE staff_name ILIKE '%{safe}%' LIMIT 5")
-    if rows:
-        return rows[0]["staff_name"]
-    return None
+def clean_sql(raw: str) -> str:
+    raw = re.sub(r"```(?:sql)?", "", raw, flags=re.IGNORECASE).strip().rstrip(";").strip()
+    m = re.search(r"(SELECT\s.+)", raw, re.IGNORECASE | re.DOTALL)
+    return m.group(1).strip() if m else raw
 
+# ── READ PIPELINE ─────────────────────────────────────────────────────────────
+def handle_read(message: str, history: list) -> str:
+    raw_sql = llm(SYSTEM_SQL, f"Convert to SQL: {message}", history, temp=0.1, max_tok=400)
+    sql = clean_sql(raw_sql)
+    logger.info(f"[SQL] {sql[:200]}")
 
-def execute_update(parsed: dict) -> tuple[bool, str, str]:
-    """
-    Execute the update on both the main roster table and the monthly table.
-    Returns (success, old_shift, message).
-    """
+    if not sql.upper().startswith("SELECT"):
+        sql = f"SELECT staff_name, shift, date FROM roster WHERE date='{TODAY}' ORDER BY staff_name"
+
+    rows = run_sql(sql)
+    if not rows:
+        avail = run_sql("SELECT DISTINCT date FROM roster ORDER BY date LIMIT 5")
+        hint = ""
+        if avail:
+            hint = f" Available dates include: {', '.join(fmt_date(r['date']) for r in avail)}."
+        return f"I couldn't find any matching records.{hint} Try rephrasing or type `debug dates`."
+
+    results_str = json.dumps(rows[:60], default=str)
+    prompt = (f'User asked: "{message}"\nSQL: {sql}\nResults ({len(rows)} rows): {results_str}\n'
+              f'Answer naturally and concisely.')
+    return llm(SYSTEM_NL, prompt, history, temp=0.3, max_tok=800)
+
+# ── UPDATE PIPELINE ───────────────────────────────────────────────────────────
+def handle_update(message: str, history: list) -> str:
+    raw = llm(SYSTEM_UPDATE, message, history, temp=0.0, max_tok=200)
+    parsed = parse_json_response(raw)
+    logger.info(f"[UPDATE parsed] {parsed}")
+
+    if "error" in parsed:
+        return (f"I understood you want to make a change, but I need more info:\n"
+                f"{parsed.get('message','')}\n\n"
+                f"Example: *\"Change Sara's shift on March 5th to Day shift\"*")
+
     staff_partial = parsed.get("staff_name", "")
-    date_str = parsed.get("date", "")
-    new_shift = parsed.get("new_shift", "")
+    date_str      = parsed.get("date", "")
+    new_shift     = parsed.get("new_shift", "")
 
-    if not staff_partial or not date_str or not new_shift:
-        return False, "", "Missing update details — I need a name, date, and shift."
+    if not all([staff_partial, date_str, new_shift]):
+        return ("I need three things to make a change:\n"
+                "- **Who** (staff name)\n- **Which date**\n- **New shift**\n\n"
+                "Example: *\"Set Muawia to OFF on April 10th\"*")
 
-    # Resolve partial name
-    staff_name = find_staff_name(staff_partial)
+    staff_name = find_staff(staff_partial)
     if not staff_name:
-        return False, "", f"I couldn't find anyone matching **{staff_partial}** in the roster."
+        return f"I couldn't find anyone matching **{staff_partial}** in the roster. Try `debug staff` to see all names."
 
-    # Get old shift
-    safe_name = staff_name.replace("'", "''")
-    old_rows = run_sql(f"""
-        SELECT shift FROM roster
-        WHERE staff_name ILIKE '%{safe_name}%'
-        AND date = '{date_str}'
-        LIMIT 1
-    """)
-    old_shift = old_rows[0]["shift"] if old_rows else "unknown"
+    old_shift = get_shift(staff_name, date_str) or "unknown"
 
-    # Update main roster table
-    ok_main = rest_update("roster", staff_name, date_str, new_shift)
-
-    # Update monthly table
+    # Update both main table and monthly table
+    ok = rest_patch("roster", staff_name, date_str, new_shift)
     try:
         d = datetime.strptime(date_str, "%Y-%m-%d")
         tbl = month_table(d.year, d.month)
         if table_exists(tbl):
-            rest_update(tbl, staff_name, date_str, new_shift)
+            rest_patch(tbl, staff_name, date_str, new_shift)
     except Exception as e:
         logger.warning(f"Monthly table update skipped: {e}")
 
-    if ok_main:
-        msg = (
-            f"✅ **Updated!**\n\n"
-            f"**{staff_name}** on **{format_date(date_str)}**\n"
-            f"**{SHIFT_MEANINGS.get(old_shift, old_shift)}** → **{SHIFT_MEANINGS.get(new_shift, new_shift)}**"
-        )
-        return True, old_shift, msg
-    else:
-        return False, old_shift, f"❌ Update failed for **{staff_name}** on {format_date(date_str)}. Please check the name and date."
+    if not ok:
+        return (f"❌ Update failed for **{staff_name}** on {fmt_date(date_str)}.\n"
+                f"Check that the name and date exist in the roster.")
 
+    old_label = SHIFT_MEANINGS.get(old_shift, old_shift)
+    new_label = SHIFT_MEANINGS.get(new_shift, new_shift)
+    answer = (f"✅ **Shift updated!**\n\n"
+              f"**Staff:** {staff_name}\n"
+              f"**Date:** {fmt_date(date_str)}\n"
+              f"**Change:** {old_label} → **{new_label}**")
 
-# ================= CORE PIPELINE =================
+    # Optionally show the month roster after update
+    if parsed.get("show_month"):
+        try:
+            d = datetime.strptime(date_str, "%Y-%m-%d")
+            tbl = month_table(d.year, d.month)
+            rows = rest_get(tbl) if table_exists(tbl) else run_sql(
+                f"SELECT staff_name,date,shift FROM roster "
+                f"WHERE date>='{d.year}-{d.month:02d}-01' AND date<='{d.year}-{d.month:02d}-{calendar.monthrange(d.year,d.month)[1]}' "
+                f"ORDER BY date,staff_name")
+            if rows:
+                answer += "\n\n" + fmt_month_roster(rows, d.year, d.month)
+        except Exception as e:
+            logger.warning(f"Post-update month view failed: {e}")
 
-def text_to_sql(question: str, history: list[dict]) -> str:
-    messages = [{"role": "system", "content": SYSTEM_SQL}]
-    for msg in history[-8:]:
-        messages.append(msg)
-    messages.append({"role": "user", "content": f"Convert to SQL: {question}"})
-    resp = client.chat.completions.create(
-        model=MODEL_NAME, messages=messages, temperature=0.1, max_tokens=400,
-    )
-    return resp.choices[0].message.content.strip()
+    return answer
 
+# ── SUGGESTION PIPELINE ───────────────────────────────────────────────────────
+def handle_suggest(message: str, history: list) -> str:
+    # First extract who/when from the message
+    extract_prompt = f"""Extract the absent staff member and date from this message.
+Today is {TODAY}.
+Return JSON only: {{"staff_name": "...", "date": "YYYY-MM-DD"}}
+Message: {message}"""
+    raw = llm("You extract info from text. Return only JSON.", extract_prompt, temp=0.0, max_tok=100)
+    info = parse_json_response(raw)
 
-def sql_to_text(question: str, sql: str, results: list, history: list[dict]) -> str:
-    results_str = json.dumps(results[:50], default=str)  # cap at 50 rows for prompt
+    staff_partial = info.get("staff_name", "")
+    date_str      = info.get("date", "")
+
+    if not staff_partial or not date_str:
+        return ("To suggest a replacement I need to know:\n"
+                "- **Who** is absent\n- **Which date**\n\n"
+                "Example: *\"Sara is sick on March 15th, who can cover her?\"*")
+
+    staff_name = find_staff(staff_partial)
+    if not staff_name:
+        return f"I couldn't find **{staff_partial}** in the roster. Try `debug staff`."
+
+    # Get the absent person's usual shift on that date
+    absent_shift = get_shift(staff_name, date_str) or "D"
+
+    # Get all staff schedules for that date ± 2 days for fatigue context
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        d_minus2 = (dt - timedelta(days=2)).strftime("%Y-%m-%d")
+        d_plus2  = (dt + timedelta(days=2)).strftime("%Y-%m-%d")
+    except:
+        d_minus2 = date_str
+        d_plus2  = date_str
+
+    context_rows = run_sql(
+        f"SELECT staff_name, date, shift FROM roster "
+        f"WHERE date>='{d_minus2}' AND date<='{d_plus2}' "
+        f"ORDER BY staff_name, date")
+
+    # Get full month for workload context
+    try:
+        month_rows = run_sql(
+            f"SELECT staff_name, date, shift FROM roster "
+            f"WHERE date>='{dt.year}-{dt.month:02d}-01' "
+            f"AND date<='{dt.year}-{dt.month:02d}-{calendar.monthrange(dt.year,dt.month)[1]}' "
+            f"ORDER BY staff_name, date")
+    except:
+        month_rows = []
+
+    # Build context string
+    context_str  = json.dumps(context_rows,  default=str)
+    month_str    = json.dumps(month_rows[:200], default=str)
+
     user_prompt = (
-        f'The user asked: "{question}"\n\n'
-        f"SQL used: {sql}\n\n"
-        f"Results ({len(results)} rows): {results_str}\n\n"
-        f"Please answer the user's question naturally."
+        f"ABSENT STAFF: {staff_name}\n"
+        f"DATE: {fmt_date(date_str)} ({date_str})\n"
+        f"THEIR SHIFT: {absent_shift} ({SHIFT_MEANINGS.get(absent_shift, absent_shift)})\n\n"
+        f"ALL STAFF SCHEDULES (±2 days around absence date):\n{context_str}\n\n"
+        f"FULL MONTH WORKLOAD (for fatigue/fairness check):\n{month_str}\n\n"
+        f"Please analyse and suggest the best 2-3 replacement options."
     )
-    messages = [{"role": "system", "content": SYSTEM_NL}]
-    for msg in history[-6:]:
-        messages.append(msg)
-    messages.append({"role": "user", "content": user_prompt})
-    resp = client.chat.completions.create(
-        model=MODEL_NAME, messages=messages, temperature=0.4, max_tokens=800,
-    )
-    return resp.choices[0].message.content.strip()
 
+    return llm(SYSTEM_SUGGEST, user_prompt, history, temp=0.4, max_tok=1000)
 
-def chat_freely(question: str, history: list[dict]) -> str:
-    messages = [{"role": "system", "content": SYSTEM_NL}]
-    for msg in history[-6:]:
-        messages.append(msg)
-    messages.append({"role": "user", "content": question})
-    resp = client.chat.completions.create(
-        model=MODEL_NAME, messages=messages, temperature=0.7, max_tokens=400,
-    )
-    return resp.choices[0].message.content.strip()
+# ── MONTH ROSTER FORMATTER ────────────────────────────────────────────────────
+def fmt_month_roster(rows: list, year: int, month: int) -> str:
+    if not rows:
+        return "No data."
+    month_name = datetime(year, month, 1).strftime("%B %Y")
+    staff_list = sorted(set(r["staff_name"] for r in rows))
+    days       = sorted(set(r["date"] for r in rows))
+    lookup     = {(r["staff_name"], r["date"]): r["shift"] for r in rows}
 
+    lines = [f"**{month_name} Roster**\n"]
+    for s in staff_list:
+        parts = []
+        for d in days:
+            shift = lookup.get((s, d), "–")
+            day_n = d.split("-")[2].lstrip("0")
+            parts.append(f"{day_n}:{shift}")
+        lines.append(f"**{s}**: " + "  ".join(parts))
+    return "\n".join(lines)
 
-# ================= CHAT ENDPOINT =================
+# ── BUILT-IN COMMANDS ─────────────────────────────────────────────────────────
+HELP_TEXT = """**CAMO Roster Assistant — Help**
 
+**View the roster:**
+- "Who is working today?"
+- "Show me the full March 2026 roster"
+- "Who is on Day shift tomorrow?"
+- "What is Sara's schedule next week?"
+- "How many people are off this Friday?"
+
+**Make changes:**
+- "Change Sara's shift on March 5th to Day shift"
+- "Give Muawia a day off on April 10th"
+- "Set Gatot to Sick on March 20 and show me March"
+- "Update Qadir's shift on the 15th to Afternoon Phone"
+
+**Get replacement suggestions:**
+- "Sara is sick on March 15th, who can cover her?"
+- "Muawia called in absent on April 3rd, suggest replacements"
+- "Geoffrey is off on March 20, who can take his shift?"
+
+**Debug:**
+`debug staff` · `debug shifts` · `debug dates` · `debug months` · `help`"""
+
+async def handle_builtin(cmd: str) -> Optional[str]:
+    c = cmd.strip().lower()
+    if c == "help":
+        return HELP_TEXT
+    if c == "debug staff":
+        r = run_sql("SELECT DISTINCT staff_name FROM roster ORDER BY staff_name")
+        names = [x["staff_name"] for x in r if x.get("staff_name")]
+        return f"**Staff ({len(names)}):**\n" + ", ".join(names)
+    if c == "debug shifts":
+        return "**Shift Codes:**\n" + "\n".join(f"• **{k}** — {v}" for k, v in SHIFT_MEANINGS.items())
+    if c == "debug dates":
+        r = run_sql("SELECT DISTINCT date FROM roster ORDER BY date LIMIT 30")
+        return "**Dates in DB:**\n" + "\n".join(f"• {fmt_date(x['date'])}" for x in r if x.get("date"))
+    if c == "debug months":
+        t = get_monthly_tables()
+        return f"**Monthly tables ({len(t)}):**\n" + "\n".join(f"• {x}" for x in t)
+    return None
+
+# ── PYDANTIC MODELS ───────────────────────────────────────────────────────────
+class Message(BaseModel):
+    role: str
+    content: str
+
+class ChatRequest(BaseModel):
+    model: str = "roster-assistant"
+    messages: List[Message]
+    temperature: Optional[float] = 0.3
+
+# ── CHAT ENDPOINT ─────────────────────────────────────────────────────────────
 @app.post("/v1/chat/completions")
 @app.post("/chat/completions")
-async def chat_completions(request: ChatRequest):
+async def chat(request: ChatRequest):
     try:
-        user_message = ""
-        history = []
-        for msg in request.messages:
-            if msg.role == "user":
-                user_message = msg.content
-            history.append({"role": msg.role, "content": msg.content})
+        user_msg = ""
+        history  = []
+        for m in request.messages:
+            if m.role == "user":
+                user_msg = m.content
+            history.append({"role": m.role, "content": m.content})
 
-        if not user_message:
-            user_message = "Hello"
+        if not user_msg:
+            user_msg = "Hello"
+        logger.info(f"User: {user_msg[:100]}")
 
-        logger.info(f"User: {user_message}")
-
-        # ── Built-in commands ────────────────────────────────────────────────
-        builtin = await handle_builtin(user_message)
+        # Built-in command check
+        builtin = await handle_builtin(user_msg)
         if builtin:
             answer = builtin
-
-        # ── Update / change intent ───────────────────────────────────────────
-        elif is_update_intent(user_message):
-            parsed = parse_update_intent(user_message, history[:-1])
-            logger.info(f"Parsed update: {parsed}")
-
-            if parsed.get("action") == "unclear":
-                answer = (
-                    "I understood you want to make a change, but I need a bit more detail. "
-                    "Could you tell me:\n"
-                    "- **Who** should be changed?\n"
-                    "- **Which date**?\n"
-                    "- **What shift** should they be on?\n\n"
-                    "Example: *\"Change Sara's shift on March 5th to Day shift\"*"
-                )
-            else:
-                success, old_shift, update_msg = execute_update(parsed)
-                answer = update_msg
-
-                # If update succeeded and user wants to see the month roster
-                if success and parsed.get("show_month"):
-                    try:
-                        d = datetime.strptime(parsed["date"], "%Y-%m-%d")
-                        tbl = month_table(d.year, d.month)
-                        rows = rest_get_month(tbl) if table_exists(tbl) else run_sql(
-                            f"SELECT staff_name, staff_id, date, shift FROM roster "
-                            f"WHERE date >= '{d.year}-{d.month:02d}-01' "
-                            f"AND date <= '{d.year}-{d.month:02d}-{calendar.monthrange(d.year, d.month)[1]}' "
-                            f"ORDER BY date, staff_name"
-                        )
-                        if rows:
-                            answer += "\n\n" + format_month_roster(rows, d.year, d.month)
-                    except Exception as e:
-                        logger.warning(f"Could not fetch month roster after update: {e}")
-
-        # ── Read / query intent ──────────────────────────────────────────────
-        elif is_roster_question(user_message):
-            raw_sql = text_to_sql(user_message, history[:-1])
-            sql = clean_sql(raw_sql)
-            logger.info(f"Generated SQL: {sql}")
-
-            if not sql or not sql.upper().startswith("SELECT"):
-                sql = "SELECT staff_name, shift, date FROM roster ORDER BY date LIMIT 20"
-
-            results = run_sql(sql)
-            logger.info(f"Rows returned: {len(results)}")
-
-            if not results:
-                available = get_available_dates()
-                hint = f" Data is available from: {', '.join(available[:5])}." if available else ""
-                answer = f"I couldn't find any matching records.{hint} Try rephrasing or type `debug dates`."
-            else:
-                answer = sql_to_text(user_message, sql, results, history[:-1])
-
-        # ── Conversational ───────────────────────────────────────────────────
         else:
-            answer = chat_freely(user_message, history[:-1])
+            # Classify intent
+            intent = get_intent(user_msg)
+            logger.info(f"Intent: {intent}")
 
-        logger.info(f"Answer preview: {answer[:100]}")
+            if   intent == "UPDATE":  answer = handle_update(user_msg, history[:-1])
+            elif intent == "SUGGEST": answer = handle_suggest(user_msg, history[:-1])
+            elif intent == "READ":    answer = handle_read(user_msg, history[:-1])
+            else:                     answer = llm(SYSTEM_NL, user_msg, history[:-1], temp=0.7, max_tok=400)
 
         return {
             "id": f"chatcmpl-{int(time.time())}",
             "object": "chat.completion",
             "created": int(time.time()),
             "model": "roster-assistant",
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": answer}, "finish_reason": "stop"}],
+            "choices": [{"index": 0,
+                         "message": {"role": "assistant", "content": answer},
+                         "finish_reason": "stop"}],
         }
-
     except Exception as e:
         logger.error(f"Chat error: {e}", exc_info=True)
         return {
@@ -638,62 +566,41 @@ async def chat_completions(request: ChatRequest):
             "object": "chat.completion",
             "created": int(time.time()),
             "model": "roster-assistant",
-            "choices": [{"index": 0, "message": {"role": "assistant",
-                                                 "content": "Sorry, I ran into an error. Please try again or type `help`."},
+            "choices": [{"index": 0,
+                         "message": {"role": "assistant",
+                                     "content": "Sorry, something went wrong. Please try again or type `help`."},
                          "finish_reason": "stop"}],
         }
 
-
-# ================= UTILITY ENDPOINTS =================
-
+# ── UTILITY ENDPOINTS ─────────────────────────────────────────────────────────
 @app.get("/")
 @app.get("/health")
 async def health():
-    count = run_sql("SELECT COUNT(*) as cnt FROM roster")
-    records = count[0]["cnt"] if count else "unknown"
-    months = get_available_months()
-    return {
-        "status": "healthy",
-        "records": records,
-        "monthly_tables": len(months),
-        "monthly_table_list": months,
-        "model": MODEL_NAME,
-    }
-
+    cnt = run_sql("SELECT COUNT(*) AS c FROM roster")
+    return {"status": "healthy", "records": cnt[0]["c"] if cnt else "?",
+            "model": MODEL, "monthly_tables": len(get_monthly_tables())}
 
 @app.get("/v1/models")
 @app.get("/models")
-async def list_models():
-    return {
-        "object": "list",
-        "data": [
-            {"id": "roster-assistant", "object": "model", "created": int(time.time()), "owned_by": "organization"}],
-    }
-
+async def models():
+    return {"object": "list", "data": [
+        {"id": "roster-assistant", "object": "model",
+         "created": int(time.time()), "owned_by": "organization"}]}
 
 @app.get("/debug/dates")
-async def debug_dates():
-    total = run_sql("SELECT COUNT(*) as cnt FROM roster")
-    rows = run_sql("SELECT DISTINCT date FROM roster ORDER BY date LIMIT 30")
-    return {
-        "total_records": total[0]["cnt"] if total else 0,
-        "dates": [format_date(r["date"]) for r in rows if r.get("date")],
-    }
-
+async def dbg_dates():
+    r = run_sql("SELECT DISTINCT date FROM roster ORDER BY date LIMIT 30")
+    return {"dates": [fmt_date(x["date"]) for x in r if x.get("date")]}
 
 @app.get("/debug/staff")
-async def debug_staff():
-    rows = run_sql("SELECT DISTINCT staff_name FROM roster ORDER BY staff_name")
-    return {"staff": [r["staff_name"] for r in rows if r.get("staff_name")]}
-
+async def dbg_staff():
+    r = run_sql("SELECT DISTINCT staff_name FROM roster ORDER BY staff_name")
+    return {"staff": [x["staff_name"] for x in r if x.get("staff_name")]}
 
 @app.get("/debug/months")
-async def debug_months():
-    return {"monthly_tables": get_available_months()}
-
-# ================= ENTRYPOINT =================
+async def dbg_months():
+    return {"monthly_tables": get_monthly_tables()}
 
 # if __name__ == "__main__":
 #     import uvicorn
-#     port = int(os.environ.get("PORT", 10000))
-#     uvicorn.run(app, host="0.0.0.0", port=port)
+#     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
