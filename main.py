@@ -17,7 +17,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
 # ── OPENAI CLIENT ─────────────────────────────────────────────────────────────
 client = OpenAI(api_key=OPENAI_API_KEY)
-MODEL  = "gpt-5.4-nano"   # $0.15/M input · $0.60/M output — reliable, fast, cheap
+MODEL  = "gpt-4o-mini"   # $0.15/M input · $0.60/M output — reliable, fast, cheap
 
 # ── SHIFT CODES ───────────────────────────────────────────────────────────────
 SHIFT_MEANINGS = {
