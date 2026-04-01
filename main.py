@@ -195,6 +195,24 @@ TABLE RULES:
 - Specific month query → use roster_YYYY_MM table (faster)
 - Multi-month or unspecified → use roster
 - Use ILIKE for name matching
+- For staff names, ALWAYS use: staff_name ILIKE '%<name>%' with wildcards
+- When searching for multiple names, use OR conditions with wildcards
+
+CORRECT PATTERNS:
+- Single name: WHERE staff_name ILIKE '%qadir%'
+- Multiple names: WHERE staff_name ILIKE '%qadir%' OR staff_name ILIKE '%marlon%' OR staff_name ILIKE '%euphracia%'
+
+WRONG PATTERNS (DO NOT USE):
+- WHERE staff_name ILIKE ANY (ARRAY[...])  ← This doesn't work for partial matches
+- WHERE staff_name = 'Qadir'  ← This requires exact match
+
+EXAMPLES:
+"show me qadir, marlon, euphracia shifts" → 
+SELECT staff_name, date, shift FROM roster_2026_04 
+WHERE staff_name ILIKE '%qadir%' 
+   OR staff_name ILIKE '%marlon%' 
+   OR staff_name ILIKE '%euphracia%'
+ORDER BY staff_name, date
 
 OUTPUT: Only the SQL query. No markdown, no backticks, no semicolons.
 """
