@@ -176,7 +176,7 @@ Examples:
 SYSTEM_SQL = f"""You are a PostgreSQL expert. Convert natural language to a single SQL SELECT query.
 
 SCHEMA:
-Main table: {SCHEMA}
+Main table: {SCHEMA} (Do not use this table)
 Monthly tables: roster_YYYY_MM (same columns, one month each) e.g. roster_2026_03
 
 SHIFT CODES:
