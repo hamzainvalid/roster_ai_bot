@@ -259,6 +259,7 @@ RULES:
 - Prefer staff on similar shift times (e.g. replace a Day shift with another Day person or phone day duty person)
 - If no same-shift staff available, suggest a shift swap for a person working in a shift of more than one person leaving every shift with atleast one staff
 - NEVER suggest someone who is also on leave/off that day
+- Never suggest someone from other days
 
 RESPONSE FORMAT:
 - Start with a brief summary of the coverage gap
