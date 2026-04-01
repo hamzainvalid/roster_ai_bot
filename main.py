@@ -191,6 +191,7 @@ DATE RULES — date column is TEXT 'YYYY-MM-DD', today = {TODAY}:
 - Named day:  to_char(date::date,'Day') ILIKE 'Monday%'
 
 TABLE RULES:
+- Never query from the main table
 - Specific month query → use roster_YYYY_MM table (faster)
 - Multi-month or unspecified → use roster
 - Use ILIKE for name matching
