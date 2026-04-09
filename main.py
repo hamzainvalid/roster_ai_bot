@@ -24,13 +24,13 @@ SHIFT_MEANINGS = {
     "D*":     "Day shift – modified/extended hours",
     "D-OJT":  "Day shift – On-the-Job Training",
     "D.OT":   "Day shift with Overtime",
-    "DP":     "Day Phone – on-call during day hours",
+    "DP":     "Day Phone",
     "A":      "Afternoon shift (14:00–23:00)",
     "A*":     "Afternoon shift – modified/extended hours",
-    "AP":     "Afternoon Phone – on-call during afternoon hours",
+    "AP":     "Afternoon Phone",
     "AP/OT":  "Afternoon Phone with Overtime",
     "N":      "Night shift (16:00–22:00)",
-    "NP":     "Night Phone – on-call during night hours",
+    "NP":     "Night Phone",
     "OFF":    "Day off / Rest day",
     "OFF-OT": "Day off with Overtime called in",
     "OT":     "Overtime",
@@ -290,8 +290,8 @@ NAME MATCHING — ALWAYS use ILIKE with wildcards:
 SHIFT MATCHING:
   ✓ shift = 'D'
   ✓ shift NOT IN ('OFF','V','PV','SL','Sick','sick','BL','FL','DIL','DT','PH')
-  "working" / "on duty" = shift NOT IN (absent list above)
-  "off" / "absent"      = shift IN (absent list above)
+  "working" / "on duty" / "duty" = shift NOT IN (absent list above)
+  "off" / "absent" / "off duty"     = shift IN (absent list above)
 
 OUTPUT: Only the raw SQL query. No markdown, no backticks, no semicolons, no explanation.
 """
@@ -312,10 +312,12 @@ RULE 1 — CAN THEY TAKE OFF?
       Day group      : D, D*, DP, D-OJT, D.OT, OT-DP
       Afternoon group: A, A*, AP, AP/OT, OT-AP
       Night group    : N, NP
-  • If ≥ 1 other person is in the same group → YES, they can take off.
-    State: "Yes, [name] can take off on [date] because [list colleagues] are also on [shift group] that day."
-  • If 0 others in same group → they CANNOT take off without a replacement.
-    State this clearly, then proceed to Rule 2.
+  • If ≥ 2 other person is in the same group → They need to contact their manager.
+    State: "[list colleagues] are also on [shift group] that day. Contact your manager"
+  • If 1 other in same group → They still need to contact their manager.
+    State: "[colleague] is also on [shift group] that day. Contact your manager"
+  • If 0 others in same group → Just say leave not possible.
+    State: "No. Contact your manager"
 
 RULE 2 — SUGGEST REPLACEMENTS (only if needed or explicitly asked)
   • Only consider staff who are WORKING that day (shift NOT in: OFF, V, PV, SL, Sick, sick, BL, FL, DIL, DT, PH).
@@ -345,12 +347,13 @@ STRICT RULES:
   • Only use information explicitly present in the database results provided.
   • NEVER invent or guess shifts, names, or dates.
   • If no results were found, say "I don't have that information in the roster."
-  • Use full shift names ("Day shift", not "D").
+  • Do not use full shift names (not "Day shift", "D").
   • Format dates as "March 5th, 2026" (not 2026-03-05).
-  • OFF / V / SL etc. = the person is not working / is absent.
+  • OFF / V / SL etc. = the person is not working / is absent / off duty.
   • Be warm, concise, and professional.
   • Use natural lists: "Alice, Bob, and Carol" not bullet points for short lists.
   • Grammar: "there is 1 person" vs "there are 3 people".
+  . Don't use full name just first names.
 """
 
 # ── INTENT ────────────────────────────────────────────────────────────────────
