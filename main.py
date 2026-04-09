@@ -16,7 +16,7 @@ SUPABASE_KEY   = os.environ.get("SUPABASE_SERVICE_KEY", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
-MODEL  = "gpt-audio-mini"
+MODEL  = "gpt-4o-mini"
 
 # ── SHIFT DEFINITIONS ─────────────────────────────────────────────────────────
 SHIFT_MEANINGS = {
