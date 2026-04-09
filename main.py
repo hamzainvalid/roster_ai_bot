@@ -261,11 +261,14 @@ Examples:
 "Hi, how are you?"                               → {{"intent": "CHAT"}}
 """
 
+
 def make_sql_prompt(table: str) -> str:
     today = today_str()
-    now   = datetime.now()
-    tom   = (now + timedelta(days=1)).strftime("%Y-%m-%d")
-    wend  = (now + timedelta(days=6)).strftime("%Y-%m-%d")
+    now = datetime.now()
+    tom = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    wend = (now + timedelta(days=6)).strftime("%Y-%m-%d")
+    yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+
     return f"""You are a PostgreSQL expert. Convert natural language to a single SQL SELECT query.
 
 TARGET TABLE: {table}
@@ -277,9 +280,26 @@ SHIFT CODES:
 DATE RULES (date is stored as TEXT 'YYYY-MM-DD'):
 - "today"     → date = '{today}'
 - "tomorrow"  → date = '{tom}'
+- "yesterday" → date = '{yesterday}'
 - "this week" → date >= '{today}' AND date <= '{wend}'
 - Named day   → to_char(date::date, 'Day') ILIKE 'Monday%'
 - A range     → date >= 'YYYY-MM-DD' AND date <= 'YYYY-MM-DD'
+- "next [day]" or "following [day]" 
+  Example: "next Monday" → date = (CURRENT_DATE + (8 - EXTRACT(DOW FROM CURRENT_DATE) + dow_offset) % 7)
+- "previous [day]" or "last [day]"
+  Example: "previous Monday" → date = (CURRENT_DATE - (EXTRACT(DOW FROM CURRENT_DATE) - dow_offset + 7) % 7)
+- "next week from [day]"
+  Example: "next week from Monday" → date = (specific_date + 7)
+- "previous week from [day]"
+  Example: "previous week from Monday" → date = (specific_date - 7)
+
+- For relative day references when a specific date is mentioned:
+  * If user mentions a specific date and says "next day" → date = specific_date + 1 day
+  * If user mentions a specific date and says "previous day" → date = specific_date - 1 day
+  * If user mentions a specific day name (e.g., "from Monday, next day") → date = that_day + 1
+  * If user mentions a specific day name (e.g., "from Monday, previous day") → date = that_day - 1
+
+IMPORTANT: When user says "next day" or "previous day" without a starting point, assume starting from today.
 
 NAME MATCHING — ALWAYS use ILIKE with wildcards:
   ✓ staff_name ILIKE '%qadir%'
