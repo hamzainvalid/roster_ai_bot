@@ -16,7 +16,7 @@ SUPABASE_KEY   = os.environ.get("SUPABASE_SERVICE_KEY", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
-MODEL  = "gpt-5.1-chat-latest"
+MODEL  = "gpt-4o-mini"
 
 # ── SHIFT DEFINITIONS ─────────────────────────────────────────────────────────
 SHIFT_MEANINGS = {
@@ -126,6 +126,9 @@ def infer_table_from_message(message: str) -> str:
     if "this month" in msg:
         return month_table(now.year, now.month)
 
+    if "next" in msg:
+        return today_str()
+
     # Explicit month name e.g. "March 2026", "march", "apr"
     months = {
         "january":1,"jan":1,"february":2,"feb":2,"march":3,"mar":3,
@@ -231,7 +234,7 @@ def llm(system: str, user: str, history: list = None,
     try:
         resp = client.chat.completions.create(
             model=MODEL, messages=msgs,
-            #temperature=temp,
+            temperature=temp,
             max_completion_tokens=max_tok)
         return resp.choices[0].message.content.strip()
     except Exception as e:
