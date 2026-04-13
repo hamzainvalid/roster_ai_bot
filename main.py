@@ -77,6 +77,12 @@ def month_table(y: int, m: int) -> str:
 def today_str() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
+def month_str():
+    return datetime.now().strftime("%m")
+
+def year_str():
+    return datetime.now().strftime("%Y")
+
 def fmt_date(d: str) -> str:
     try:
         dt = datetime.strptime(str(d).split()[0], "%Y-%m-%d")
@@ -256,6 +262,7 @@ Examples:
 "Who is working today?"                          → {{"intent": "READ"}}
 "Show me the March 2026 roster"                  → {{"intent": "READ"}}
 "What shift is Sara on next Monday?"             → {{"intent": "READ"}}
+"Tell me Qadir's shift today"                    → {{"intent": "READ"}}
 "Can Qadir take off on March 3?"                 → {{"intent": "SUGGEST"}}
 "Sara is sick on April 3, who can replace her?"  → {{"intent": "SUGGEST"}}
 "Is it possible for Muawia to take off Friday?"  → {{"intent": "SUGGEST"}}
@@ -265,6 +272,8 @@ Examples:
 
 def make_sql_prompt(table: str) -> str:
     today = today_str()
+    month = month_str()
+    year = year_str()
     now = datetime.now()
     tom = (now + timedelta(days=1)).strftime("%Y-%m-%d")
     wend = (now + timedelta(days=6)).strftime("%Y-%m-%d")
@@ -288,8 +297,8 @@ SHIFT MATCHING:
 
 
 DATE RULES (date is stored as TEXT 'YYYY-MM-DD'):
-- If no year specified => current year
-- If no month specified => current month
+- If no year specified => {year}
+- If no month specified => {month}
 - If no day specified => '{today}' example - what is Marlon's next duty -> date = CURRENT_DATE
 - If 'next', 'upcoming', 'further' => '{today}
 - "today"     → date = '{today}'
