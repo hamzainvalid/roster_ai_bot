@@ -277,17 +277,28 @@ COLUMNS: staff_name TEXT, staff_id TEXT, date TEXT (YYYY-MM-DD), shift TEXT
 SHIFT CODES:
 {SHIFTS_JSON}
 
+SHIFT MATCHING:
+  ✓ shift = 'D'
+  ✓ shift NOT IN ('OFF','V','PV','SL','Sick','sick','BL','FL','DIL','DT','PH')
+  "working" / "on duty" / "duty" / "duties" = shift NOT IN (absent list above)
+  "off" / "absent" / "off duty"     = shift IN (absent list above)
+  When asked for duty always look for shift NOT IN (absent list above)
+  When talking or asked about duty or duties skip the (absent list above), example(tell me Qadir's next 3 duties) only mention the shifts NOT IN (absent list above)
+
+
 DATE RULES (date is stored as TEXT 'YYYY-MM-DD'):
 - If no year specified => current year
 - If no month specified => current month
-- If no day specified => '{today}'
+- If no day specified => '{today}' example - what is Marlon's next duty -> date = CURRENT_DATE
 - "today"     → date = '{today}'
 - "tomorrow"  → date = '{tom}'
 - "yesterday" → date = '{yesterday}'
 - "this week" → date >= '{today}' AND date <= '{wend}'
 - Named day   → to_char(date::date, 'Day') ILIKE 'Monday%'
 - A range     → date >= 'YYYY-MM-DD' AND date <= 'YYYY-MM-DD'
-- "next [day]" or "following [day]" 
+- "next [day]" or "next" or "following [day]" or "following" 
+  Example: "next duty" -> date = CURRENT_DATE
+  Example: "next duties" -> date = CURRENT_DATE until CURRENT_DATE + SPECIFIED_NUMBER_OF_DUTIES
   Example: "next Monday" → date = (CURRENT_DATE + (8 - EXTRACT(DOW FROM CURRENT_DATE) + dow_offset) % 7)
 - "previous [day]" or "last [day]"
   Example: "previous Monday" → date = (CURRENT_DATE - (EXTRACT(DOW FROM CURRENT_DATE) - dow_offset + 7) % 7)
@@ -310,13 +321,6 @@ NAME MATCHING — ALWAYS use ILIKE with wildcards:
   ✗ staff_name = 'Qadir'           (exact match — wrong)
   ✗ staff_name ILIKE ANY(ARRAY[…]) (doesn't work — wrong)
 
-SHIFT MATCHING:
-  ✓ shift = 'D'
-  ✓ shift NOT IN ('OFF','V','PV','SL','Sick','sick','BL','FL','DIL','DT','PH')
-  "working" / "on duty" / "duty" = shift NOT IN (absent list above)
-  "off" / "absent" / "off duty"     = shift IN (absent list above)
-  When asked for duty always look for shift NOT IN (absent list above)
-  Skip the (absent list above) when asked or talking about duty, example(tell me Qadir's next 3 duties) only mention the shifts NOT IN (absent list above)
   
 
 OUTPUT: Only the raw SQL query. No markdown, no backticks, no semicolons, no explanation.
