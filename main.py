@@ -291,6 +291,7 @@ DATE RULES (date is stored as TEXT 'YYYY-MM-DD'):
 - If no year specified => current year
 - If no month specified => current month
 - If no day specified => '{today}' example - what is Marlon's next duty -> date = CURRENT_DATE
+- If 'next', 'upcoming', 'further' => '{today}
 - "today"     → date = '{today}'
 - "tomorrow"  → date = '{tom}'
 - "yesterday" → date = '{yesterday}'
