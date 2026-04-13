@@ -127,7 +127,7 @@ def infer_table_from_message(message: str) -> str:
         return month_table(now.year, now.month)
 
     if "next" in msg:
-        return today_str()
+        return month_table(now.year, now.month)
 
     # Explicit month name e.g. "March 2026", "march", "apr"
     months = {
