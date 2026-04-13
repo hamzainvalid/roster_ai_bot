@@ -315,6 +315,9 @@ SHIFT MATCHING:
   ✓ shift NOT IN ('OFF','V','PV','SL','Sick','sick','BL','FL','DIL','DT','PH')
   "working" / "on duty" / "duty" = shift NOT IN (absent list above)
   "off" / "absent" / "off duty"     = shift IN (absent list above)
+  When asked for duty always look for shift NOT IN (absent list above)
+  Skip the (absent list above) when asked or talking about duty, example(tell me Qadir's next 3 duties) only mention the shifts NOT IN (absent list above)
+  
 
 OUTPUT: Only the raw SQL query. No markdown, no backticks, no semicolons, no explanation.
 """
