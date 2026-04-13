@@ -291,12 +291,13 @@ SHIFT CODES:
 {SHIFTS_JSON}
 
 SHIFT MATCHING:
+  ('OFF','V','PV','SL','Sick','sick','BL','FL','DIL','DT','PH')
+  When asked for duty on a specific day or date (example tomorrow), if shift IN (absent list above), just reply with, you don't have a duty on that day, you have the shift name from (absent list above)
   ✓ shift = 'D'
   ✓ shift NOT IN ('OFF','V','PV','SL','Sick','sick','BL','FL','DIL','DT','PH')
   "working" / "on duty" / "duty" / "duties" = shift NOT IN (absent list above)
   "off" / "absent" / "off duty"     = shift IN (absent list above)
-  When asked for duty always look for shift NOT IN (absent list above)
-  When asked for duty on a specific day or date (example tomorrow), if shift IN (absent list above), just reply with specific day or date, you don't have a duty, you have (shift name) 
+  When asked for duty always look for shift NOT IN (absent list above) 
   When talking or asked about duty or duties skip the (absent list above), example(tell me Qadir's next 3 duties) only mention the shifts NOT IN (absent list above)
 
 
