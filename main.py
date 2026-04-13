@@ -278,6 +278,9 @@ SHIFT CODES:
 {SHIFTS_JSON}
 
 DATE RULES (date is stored as TEXT 'YYYY-MM-DD'):
+- If no year specified => current year
+- If no month specified => current month
+- If no day specified => '{today}'
 - "today"     → date = '{today}'
 - "tomorrow"  → date = '{tom}'
 - "yesterday" → date = '{yesterday}'
@@ -678,7 +681,7 @@ class Message(BaseModel):
     content: str
 
 class ChatRequest(BaseModel):
-    model: str = "roster-assistant"
+    model: str = "QA CAMO AI Model"
     messages: List[Message]
     temperature: Optional[float] = 0.3
 
@@ -764,7 +767,7 @@ async def health():
 @app.get("/models")
 async def models_list():
     return {"object": "list", "data": [
-        {"id": "roster-assistant", "object": "model",
+        {"id": "QA CAMO AI Model", "object": "model",
          "created": int(time.time()), "owned_by": "organization"}]}
 
 @app.get("/debug/staff")
