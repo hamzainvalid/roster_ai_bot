@@ -296,6 +296,7 @@ SHIFT MATCHING:
   "working" / "on duty" / "duty" / "duties" = shift NOT IN (absent list above)
   "off" / "absent" / "off duty"     = shift IN (absent list above)
   When asked for duty always look for shift NOT IN (absent list above)
+  When asked for duty on a specific day or date (example tomorrow), if shift IN (absent list above), just reply with specific day or date, you don't have a duty, you have (shift name) 
   When talking or asked about duty or duties skip the (absent list above), example(tell me Qadir's next 3 duties) only mention the shifts NOT IN (absent list above)
 
 
