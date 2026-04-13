@@ -225,7 +225,8 @@ def llm(system: str, user: str, history: list = None,
     try:
         resp = client.chat.completions.create(
             model=MODEL, messages=msgs,
-            temperature=temp, max_completion_tokens=max_tok)
+            #temperature=temp,
+            max_completion_tokens=max_tok)
         return resp.choices[0].message.content.strip()
     except Exception as e:
         logger.error(f"LLM: {e}")
