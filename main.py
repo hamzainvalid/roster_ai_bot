@@ -300,7 +300,7 @@ DATE RULES (date is stored as TEXT 'YYYY-MM-DD'):
 - If no year specified => {year}
 - If no month specified => {month}
 - If no day specified => '{today}' example - what is Marlon's duty -> date = CURRENT_DATE
-- If 'next', 'upcoming', 'further' => '{today} + 1
+- If 'next', 'upcoming', 'further' => date > {today} LIMIT 1
 - "today"     → date = '{today}'
 - "tomorrow"  → date = '{tom}'
 - "yesterday" → date = '{yesterday}'
@@ -308,8 +308,8 @@ DATE RULES (date is stored as TEXT 'YYYY-MM-DD'):
 - Named day   → to_char(date::date, 'Day') ILIKE 'Monday%'
 - A range     → date >= 'YYYY-MM-DD' AND date <= 'YYYY-MM-DD'
 - "next [day]" or "next" or "following [day]" or "following" 
-  Example: "next duty" -> date = CURRENT_DATE + 1
-  Example: "next duties" -> date = CURRENT_DATE until CURRENT_DATE + SPECIFIED_NUMBER_OF_DUTIES
+  Example: "next duty" -> date > CURRENT_DATE LIMIT 1
+  Example: "next duties" -> date > CURRENT_DATE LIMIT SPECIFIED_NUMBER_OF_DUTIES
   Example: "next Monday" → date = (CURRENT_DATE + (8 - EXTRACT(DOW FROM CURRENT_DATE) + dow_offset) % 7)
 - "previous [day]" or "last [day]"
   Example: "previous Monday" → date = (CURRENT_DATE - (EXTRACT(DOW FROM CURRENT_DATE) - dow_offset + 7) % 7)
@@ -334,7 +334,7 @@ NAME MATCHING — ALWAYS use ILIKE with wildcards:
 
 SHIFT MATCHING:
 Rule 1:
-  When user message contains a specific shift name skip and go to rule 2.
+  When and only user message contains a specific shift name skip and go to rule 2.
   ('OFF','V','PV','SL','Sick','sick','BL','FL','DIL','DT','PH') = Absent list
   When asked for duty on a specific day or date (example tomorrow), run the sql, if shift IN (absent list above), just reply with, you don't have a duty on that day, you have the shift name from (absent list above)
   When talking or asked about more than one duty or shift(duties of shifts) filter duties from that day that are not in absent list above example: What are Qadir's next 3 dutie -> "SELECT staff_name, staff_id, date, shift FROM roster_2026_04 WHERE staff_name ILIKE '%qadir%' AND date::DATE > CURRENT_DATE AND shift NOT IN ('OFF','V','PV','SL','Sick','sick','BL','FL','DIL','DT','PH') limit 3"
@@ -345,7 +345,6 @@ Rule 2:
   ✓ shift NOT IN ('OFF','V','PV','SL','Sick','sick','BL','FL','DIL','DT','PH')
   "working" / "on duty" / "duty" / "duties" = shift NOT IN (absent list above)
   "off" / "absent" / "off duty"     = shift IN (absent list above)
-  When talking or asked about more than one duty or shift(duties of shifts) if duty on any of the day is from the absent list above, skip that day or days and rerun the query for the next three days and repeat until you get only the the shifts not in absent list above, example(tell me Qadir's next 3 duties) only mention the shifts NOT IN (absent list above) 
 
 OUTPUT: Only the raw SQL query. No markdown, no backticks, no semicolons, no explanation.
 """
