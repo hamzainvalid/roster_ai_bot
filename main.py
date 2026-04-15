@@ -334,9 +334,8 @@ NAME MATCHING — ALWAYS use ILIKE with wildcards:
 
 SHIFT MATCHING:
 Rule 1:
-  When and only user message contains a specific shift name skip and go to rule 2.
+  When and only user message contains a specific shift name (in SHIFT CODES) skip and go to rule 2 otherwise ignore rule 2 below.
   ('OFF','V','PV','SL','Sick','sick','BL','FL','DIL','DT','PH') = Absent list
-  When asked for duty on a specific day or date (example tomorrow), run the sql, if shift IN (absent list above), just reply with, you don't have a duty on that day, you have the shift name from (absent list above)
   When talking or asked about more than one duty or shift(duties of shifts) filter duties from that day that are not in absent list above example: What are Qadir's next 3 dutie -> "SELECT staff_name, staff_id, date, shift FROM roster_2026_04 WHERE staff_name ILIKE '%qadir%' AND date::DATE > CURRENT_DATE AND shift NOT IN ('OFF','V','PV','SL','Sick','sick','BL','FL','DIL','DT','PH') limit 3"
   
 Rule 2:
