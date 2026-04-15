@@ -296,16 +296,6 @@ COLUMNS: staff_name TEXT, staff_id TEXT, date TEXT (YYYY-MM-DD), shift TEXT
 SHIFT CODES:
 {SHIFTS_JSON}
 
-SHIFT MATCHING:
-  ('OFF','V','PV','SL','Sick','sick','BL','FL','DIL','DT','PH') = Absent list
-  When asked for duty on a specific day or date (example tomorrow), run the sql, if shift IN (absent list above), just reply with, you don't have a duty on that day, you have the shift name from (absent list above)
-  ✓ shift = 'D'
-  ✓ shift NOT IN ('OFF','V','PV','SL','Sick','sick','BL','FL','DIL','DT','PH')
-  "working" / "on duty" / "duty" / "duties" = shift NOT IN (absent list above)
-  "off" / "absent" / "off duty"     = shift IN (absent list above)
-  When talking or asked about more than one duty or shift(duties of shifts) if duty on any of the day is from the absent list above, skip that day or days and rerun the query for the next three days and repeat until you get only the the shifts not in absent list above, example(tell me Qadir's next 3 duties) only mention the shifts NOT IN (absent list above) 
-
-
 DATE RULES (date is stored as TEXT 'YYYY-MM-DD'):
 - If no year specified => {year}
 - If no month specified => {month}
@@ -342,7 +332,20 @@ NAME MATCHING — ALWAYS use ILIKE with wildcards:
   ✗ staff_name = 'Qadir'           (exact match — wrong)
   ✗ staff_name ILIKE ANY(ARRAY[…]) (doesn't work — wrong)
 
+SHIFT MATCHING:
+Rule 1:
+  When user message contains a specific shift name skip and go to rule 2.
+  ('OFF','V','PV','SL','Sick','sick','BL','FL','DIL','DT','PH') = Absent list
+  When asked for duty on a specific day or date (example tomorrow), run the sql, if shift IN (absent list above), just reply with, you don't have a duty on that day, you have the shift name from (absent list above)
+  When talking or asked about more than one duty or shift(duties of shifts) filter duties from that day that are not in absent list above example: What are Qadir's next 3 dutie -> "SELECT staff_name, staff_id, date, shift FROM roster_2026_04 WHERE staff_name ILIKE '%qadir%' AND date::DATE > CURRENT_DATE AND shift NOT IN ('OFF','V','PV','SL','Sick','sick','BL','FL','DIL','DT','PH') limit 3"
   
+Rule 2:
+  ('OFF','V','PV','SL','Sick','sick','BL','FL','DIL','DT','PH') = Absent list
+  ✓ shift = 'D'
+  ✓ shift NOT IN ('OFF','V','PV','SL','Sick','sick','BL','FL','DIL','DT','PH')
+  "working" / "on duty" / "duty" / "duties" = shift NOT IN (absent list above)
+  "off" / "absent" / "off duty"     = shift IN (absent list above)
+  When talking or asked about more than one duty or shift(duties of shifts) if duty on any of the day is from the absent list above, skip that day or days and rerun the query for the next three days and repeat until you get only the the shifts not in absent list above, example(tell me Qadir's next 3 duties) only mention the shifts NOT IN (absent list above) 
 
 OUTPUT: Only the raw SQL query. No markdown, no backticks, no semicolons, no explanation.
 """
