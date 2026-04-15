@@ -129,6 +129,12 @@ def infer_table_from_message(message: str) -> str:
     if "next" in msg:
         return month_table(now.year, now.month)
 
+    if "tomorrow" or "yesterday" in msg:
+        return month_table(now.year, now.month)
+
+    if "duty" or "off" or "holiday" or "shift" in msg:
+        return month_table(now.year, now.month)
+
     # Explicit month name e.g. "March 2026", "march", "apr"
     months = {
         "january":1,"jan":1,"february":2,"feb":2,"march":3,"mar":3,
@@ -291,14 +297,13 @@ SHIFT CODES:
 {SHIFTS_JSON}
 
 SHIFT MATCHING:
-  ('OFF','V','PV','SL','Sick','sick','BL','FL','DIL','DT','PH')
-  When asked for duty on a specific day or date (example tomorrow), if shift IN (absent list above), just reply with, you don't have a duty on that day, you have the shift name from (absent list above)
+  ('OFF','V','PV','SL','Sick','sick','BL','FL','DIL','DT','PH') = Absent list
+  When asked for duty on a specific day or date (example tomorrow), run the sql, if shift IN (absent list above), just reply with, you don't have a duty on that day, you have the shift name from (absent list above)
   ✓ shift = 'D'
   ✓ shift NOT IN ('OFF','V','PV','SL','Sick','sick','BL','FL','DIL','DT','PH')
   "working" / "on duty" / "duty" / "duties" = shift NOT IN (absent list above)
   "off" / "absent" / "off duty"     = shift IN (absent list above)
-  When asked for duty always look for shift NOT IN (absent list above) 
-  When talking or asked about duty or duties skip the (absent list above), example(tell me Qadir's next 3 duties) only mention the shifts NOT IN (absent list above)
+  When talking or asked about more than one duty or shift(duties of shifts) skip the (absent list above), example(tell me Qadir's next 3 duties) only mention the shifts NOT IN (absent list above) 
 
 
 DATE RULES (date is stored as TEXT 'YYYY-MM-DD'):
