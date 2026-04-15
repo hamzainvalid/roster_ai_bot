@@ -336,6 +336,9 @@ NAME MATCHING — ALWAYS use ILIKE with wildcards:
 SHIFT RULE:
   When talking or asked about more than one duty or shift(duties or shifts) filter duties from that day that are not in absent list above example: What are Qadir's next 3 duties -> "SELECT staff_name, staff_id, date, shift FROM roster_2026_04 WHERE staff_name ILIKE '%qadir%' AND date::DATE > CURRENT_DATE AND shift NOT IN ('OFF','V','PV','SL','Sick','sick','BL','FL','DIL','DT','PH') limit 3"
 
+HARD RULE:
+  If user asks what is Muawia's duty tomorrow? -> SELECT staff_name, staff_id, date, shift FROM roster_2026_04 WHERE staff_name ILIKE '%muawia%' AND date = '2026-04-16' LIMIT 1
+
 OUTPUT: Only the raw SQL query. No markdown, no backticks, no semicolons, no explanation.
 """
 
