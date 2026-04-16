@@ -332,6 +332,8 @@ NAME MATCHING — ALWAYS use ILIKE with wildcards:
   ✓ staff_name ILIKE '%qadir%' OR staff_name ILIKE '%marlon%'
   ✗ staff_name = 'Qadir'           (exact match — wrong)
   ✗ staff_name ILIKE ANY(ARRAY[…]) (doesn't work — wrong)
+  If no name mentioned - respond with "Please state the name of the staff"
+  Rest of the "team" / "people" / "staff" / "members" / "others" - SELECT staff_name WHERE staff_name is not current_name
 
 SHIFT RULE:
   When talking or asked about more than one duty or shift(duties or shifts) filter duties from that day that are not in absent list above example: What are Qadir's next 3 duties -> "SELECT staff_name, staff_id, date, shift FROM roster_2026_04 WHERE staff_name ILIKE '%qadir%' AND date::DATE > CURRENT_DATE AND shift NOT IN ('OFF','V','PV','SL','Sick','sick','BL','FL','DIL','DT','PH') limit 3"
@@ -361,10 +363,13 @@ RULE 1 — CAN THEY TAKE OFF?
       Night group    : N, NP
   • If ≥ 2 other person is in the same group → They need to contact their manager.
     State: "[list colleagues] are also on [shift group] that day. Contact your manager"
+    Ignore RULE 2
   • If 1 other in same group → They still need to contact their manager.
     State: "[colleague] is also on [shift group] that day. Contact your manager"
+    Ignore RULE 2
   • If 0 others in same group → Just say leave not possible.
     State: "No. Contact your manager"
+    Ignore RULE 2
 
 RULE 2 — SUGGEST REPLACEMENTS (only if needed or explicitly asked)
   • Only consider staff who are WORKING that day (shift NOT in: OFF, V, PV, SL, Sick, sick, BL, FL, DIL, DT, PH).
@@ -381,7 +386,6 @@ RULE 3 — NEVER invent data. Only use names and shifts from the snapshot provid
 FORMAT:
   • Keep it concise and scannable.
   • Use **bold** for names and shift codes.
-  • End with a one-sentence recommendation.
 """
 
 def make_nl_prompt() -> str:
