@@ -306,7 +306,7 @@ DATE RULES (date is stored as TEXT 'YYYY-MM-DD'):
 - "tomorrow"  → date = '{tom}'
 - "yesterday" → date = '{yesterday}'
 - "this week" → date >= '{today}' AND date <= '{wend}'
-- Named day   → to_char(date::date, 'Day') ILIKE 'Monday%'
+- Named day   → to_char(date::date, 'Day') ILIKE 'Monday%' AND date::DATE >= current_date
 - A range     → date >= 'YYYY-MM-DD' AND date <= 'YYYY-MM-DD'
 - "next [day]" or "next" or "following [day]" or "following" 
   Example: "next duty" -> date > CURRENT_DATE AND WHERE shift not in ('OFF','V','PV','SL','Sick','sick','BL','FL','DIL','DT','PH') LIMIT 1
@@ -338,6 +338,7 @@ SHIFT RULE:
 
 HARD RULE:
   If user asks what is Muawia's duty tomorrow? -> SELECT staff_name, staff_id, date, shift FROM roster_2026_04 WHERE staff_name ILIKE '%muawia%' AND date = '2026-04-16' LIMIT 1
+  When user asks to check for a specific duty for a specific staff on a specific day for example "Is Qadir D on Tuesday?" Run query: SELECT staff_name, staff_id, date, shift FROM roster_2026_04 WHERE staff_name ILIKE '%qadir%' AND to_char(date::date, 'Day') ILIKE 'Tuesday%' AND date::DATE >= current_date LIMIT 1 - Just answer yes if it is right otherwise answer no and write the correct duty
 
 OUTPUT: Only the raw SQL query. No markdown, no backticks, no semicolons, no explanation.
 """
